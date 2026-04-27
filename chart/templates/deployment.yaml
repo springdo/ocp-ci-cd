@@ -50,12 +50,9 @@ spec:
             - name: LOG_LEVEL
               value: {{ .Values.env.LOG_LEVEL | quote }}
             {{- end }}
-            {{- if .Values.bearerTokenSecret.name }}
+            {{- if .Values.env.MCP_BEARER_TOKEN }}
             - name: MCP_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.bearerTokenSecret.name }}
-                  key: {{ .Values.bearerTokenSecret.key | default "token" }}
+              value: {{ .Values.env.MCP_BEARER_TOKEN | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

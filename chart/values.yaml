@@ -41,17 +41,13 @@ workspace:
 
 # ---------------------------------------------------------------------------
 # Application environment variables.
-# MCP_BEARER_TOKEN should be supplied at deploy time via a Secret, not here.
 # ---------------------------------------------------------------------------
 env:
   LOG_LEVEL: INFO
   # POD_NAMESPACE is injected automatically via the Downward API — do not set here.
-
-# Supply bearer token as a Kubernetes Secret and reference it here:
-# bearerTokenSecret:
-#   name: mcp-bearer-token
-#   key: token
-bearerTokenSecret: {}
+  # Bearer token for MCP endpoint authentication.
+  # Override this value at deploy time — do not commit a production token here.
+  MCP_BEARER_TOKEN: "daffy-duck"
 
 resources:
   requests:
