@@ -53,6 +53,11 @@ async def oc_new_build(
     Raises:
         RuntimeError: If the command exits non-zero.
     """
+    logger.info(
+        "oc_new_build called  name=%r  strategy=%r  image_stream=%r  binary=%s  namespace=%s",
+        name, strategy, image_stream, binary, NAMESPACE,
+    )
+
     argv = ["oc", "new-build", f"--name={name}", f"--strategy={strategy}", "-n", NAMESPACE]
     if image_stream:
         argv.append(image_stream)
@@ -65,11 +70,19 @@ async def oc_new_build(
             else:
                 logger.warning("Dropping disallowed flag from oc new-build: %r", flag)
 
+    logger.debug("oc new-build argv: %s", argv)
     result = await run(argv)
+
     if result.exit_code != 0:
+        logger.error(
+            "oc_new_build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
+            name, result.exit_code, result.stdout, result.stderr,
+        )
         raise RuntimeError(
             f"oc new-build failed (exit {result.exit_code}):\n{result.stderr}"
         )
+
+    logger.info("oc_new_build OK  name=%r", name)
     return result.stdout
 
 
@@ -92,12 +105,23 @@ async def oc_start_build(
     Raises:
         RuntimeError: If the command exits non-zero.
     """
+    logger.info(
+        "oc_start_build called  buildconfig=%r  commit=%r  namespace=%s",
+        buildconfig, commit, NAMESPACE,
+    )
+
     argv = ["oc", "start-build", buildconfig, "-n", NAMESPACE]
     if commit:
         argv += ["--commit", commit]
 
+    logger.debug("oc start-build argv: %s", argv)
     result = await run(argv)
+
     if result.exit_code != 0:
+        logger.error(
+            "oc_start_build FAILED  buildconfig=%r  exit=%d\nstdout: %s\nstderr: %s",
+            buildconfig, result.exit_code, result.stdout, result.stderr,
+        )
         raise RuntimeError(
             f"oc start-build failed (exit {result.exit_code}):\n{result.stderr}"
         )
@@ -110,6 +134,13 @@ async def oc_start_build(
         if match:
             build_name = match.group(1)
             break
+
+    if build_name:
+        logger.info("oc_start_build OK  buildconfig=%r  build_name=%r", buildconfig, build_name)
+    else:
+        logger.warning(
+            "oc_start_build: could not parse build name from output: %r", result.stdout
+        )
 
     return {"build_name": build_name, "output": result.stdout}
 
@@ -145,8 +176,15 @@ async def wait_for_build(
     start = time.monotonic()
     phase = "Unknown"
     message = ""
+    poll_count = 0
+
+    logger.info(
+        "wait_for_build called  build=%r  timeout=%ds  interval=%ds  namespace=%s",
+        build_name, timeout_seconds, poll_interval_seconds, NAMESPACE,
+    )
 
     while time.monotonic() < deadline:
+        poll_count += 1
         result = await run([
             "oc", "get", f"build/{build_name}",
             "-n", NAMESPACE,
@@ -158,21 +196,42 @@ async def wait_for_build(
             phase = parts[0] if parts[0] else "Unknown"
             message = parts[1] if len(parts) > 1 else ""
 
+            logger.info(
+                "wait_for_build poll #%d  build=%r  phase=%r  elapsed=%.0fs",
+                poll_count, build_name, phase, time.monotonic() - start,
+            )
+
             if phase in _TERMINAL_PHASES:
+                elapsed = round(time.monotonic() - start)
+                if phase == "Complete":
+                    logger.info(
+                        "wait_for_build COMPLETE  build=%r  elapsed=%ds",
+                        build_name, elapsed,
+                    )
+                else:
+                    logger.error(
+                        "wait_for_build FAILED  build=%r  phase=%r  message=%r  elapsed=%ds",
+                        build_name, phase, message, elapsed,
+                    )
                 return {
                     "phase": phase,
                     "success": phase == "Complete",
                     "message": message,
-                    "elapsed_seconds": round(time.monotonic() - start),
+                    "elapsed_seconds": elapsed,
                 }
         else:
             logger.warning(
-                "oc get build/%s returned exit %d: %s",
-                build_name, result.exit_code, result.stderr.strip(),
+                "wait_for_build poll #%d: oc get build/%s returned exit %d: %s",
+                poll_count, build_name, result.exit_code, result.stderr.strip(),
             )
 
         await asyncio.sleep(poll_interval_seconds)
 
+    elapsed = round(time.monotonic() - start)
+    logger.error(
+        "wait_for_build TIMEOUT  build=%r  last_phase=%r  polls=%d  elapsed=%ds",
+        build_name, phase, poll_count, elapsed,
+    )
     return {
         "phase": "Timeout",
         "success": False,
@@ -180,5 +239,5 @@ async def wait_for_build(
             f"Build did not reach a terminal phase within {timeout_seconds}s. "
             f"Last known phase: {phase}"
         ),
-        "elapsed_seconds": round(time.monotonic() - start),
+        "elapsed_seconds": elapsed,
     }

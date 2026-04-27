@@ -7,9 +7,13 @@ Outputs are capped at MAX_OUTPUT_BYTES to keep MCP responses manageable.
 """
 
 import asyncio
+import logging
 import os
 import pathlib
+import time
 from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
 
 WORKSPACE_ROOT = pathlib.Path(os.environ.get("WORKSPACE_ROOT", "/tmp/workspace"))
 
@@ -30,24 +34,55 @@ async def run(argv: list[str], cwd: pathlib.Path | None = None) -> RunResult:
               absolute path. Never passes user input through a shell.
         cwd:  Working directory; defaults to WORKSPACE_ROOT.
     """
+    effective_cwd = cwd or WORKSPACE_ROOT
+    cmd_str = " ".join(argv)
+
+    logger.debug("$ %s  (cwd=%s)", cmd_str, effective_cwd)
+
+    start = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=cwd or WORKSPACE_ROOT,
+        cwd=effective_cwd,
     )
     stdout_bytes, stderr_bytes = await proc.communicate()
-    return RunResult(
-        exit_code=proc.returncode,  # type: ignore[arg-type]
-        stdout=_truncate(stdout_bytes.decode("utf-8", errors="replace")),
-        stderr=_truncate(stderr_bytes.decode("utf-8", errors="replace")),
-    )
+    elapsed = round((time.monotonic() - start) * 1000)
+
+    stdout = _truncate(stdout_bytes.decode("utf-8", errors="replace"))
+    stderr = _truncate(stderr_bytes.decode("utf-8", errors="replace"))
+    exit_code = proc.returncode  # type: ignore[assignment]
+
+    if exit_code == 0:
+        logger.info("✓ %s  exit=0  elapsed=%dms", argv[0], elapsed)
+        if stdout.strip():
+            logger.debug("stdout: %s", _preview(stdout))
+        if stderr.strip():
+            logger.debug("stderr: %s", _preview(stderr))
+    else:
+        logger.error(
+            "✗ %s  exit=%d  elapsed=%dms\n  cmd : %s\n  stdout: %s\n  stderr: %s",
+            argv[0], exit_code, elapsed,
+            cmd_str,
+            _preview(stdout) or "(empty)",
+            _preview(stderr) or "(empty)",
+        )
+
+    return RunResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
 
 def _truncate(text: str) -> str:
     encoded = text.encode("utf-8")
     if len(encoded) > MAX_OUTPUT_BYTES:
         return encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace") + "\n… (output truncated)"
+    return text
+
+
+def _preview(text: str, max_chars: int = 500) -> str:
+    """Return first max_chars of text for log lines."""
+    text = text.strip()
+    if len(text) > max_chars:
+        return text[:max_chars] + " …"
     return text
 
 
@@ -71,4 +106,5 @@ def confined_path(relative: str) -> pathlib.Path:
         raise ValueError(
             f"Path {relative!r} resolves outside WORKSPACE_ROOT ({root})"
         )
+    logger.debug("confined_path %r → %s", relative, resolved)
     return resolved

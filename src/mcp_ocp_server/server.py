@@ -4,17 +4,18 @@ Start with:
     mcp-ocp-server
 
 Environment variables:
-    BIND_HOST           Bind address (default: 127.0.0.1; use 0.0.0.0 in-cluster)
+    BIND_HOST           Bind address (default: 0.0.0.0)
     PORT                HTTP port (default: 8000)
     WORKSPACE_ROOT      Base directory for git clones / Helm chart paths
     POD_NAMESPACE       Target OpenShift namespace (injected by Downward API in-cluster)
     KUBECONFIG          Optional; auto-generated from SA token when running in-cluster
-    MCP_BEARER_TOKEN    When set, all requests must carry "Authorization: Bearer <token>"
-    LOG_LEVEL           Python logging level (default: INFO)
+    MCP_API_KEY         When set, all requests must carry "X-API-Key: <value>"
+    LOG_LEVEL           Python logging level (default: INFO; set DEBUG for full traces)
 """
 
 import logging
 import os
+import time
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
@@ -33,11 +34,17 @@ from .tools.openshift import wait_for_build as _wait_for_build
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# FastMCP server — stateless HTTP (one request → one response JSON or SSE)
+# FastMCP server
 # ---------------------------------------------------------------------------
+
+# When BIND_HOST is 0.0.0.0 (the default for containers), FastMCP does NOT
+# auto-enable its localhost-only DNS rebinding protection, so requests from
+# an OpenShift Route hostname are accepted.
+_BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
 mcp = FastMCP(
     "ocp-ci-cd",
+    host=_BIND_HOST,
     instructions=(
         "MCP server for OpenShift builds and Helm deployments. "
         "Typical flow: git_clone → oc_new_build → oc_start_build → "
@@ -61,7 +68,15 @@ async def git_clone(repo_url: str, local_path: str, branch: str | None = None) -
                     Must not contain '..' or resolve outside WORKSPACE_ROOT.
         branch:     Optional branch, tag, or commit ref to check out.
     """
-    return await _git_clone(repo_url, local_path, branch)
+    logger.info("TOOL git_clone  repo=%s  local_path=%r  branch=%r", repo_url, local_path, branch)
+    start = time.monotonic()
+    try:
+        result = await _git_clone(repo_url, local_path, branch)
+        logger.info("TOOL git_clone OK  elapsed=%.1fs", time.monotonic() - start)
+        return result
+    except Exception as exc:
+        logger.error("TOOL git_clone ERROR  elapsed=%.1fs  error=%s", time.monotonic() - start, exc)
+        raise
 
 
 @mcp.tool()
@@ -84,7 +99,15 @@ async def oc_new_build(
                       --context-dir, --to, --source-secret, --push-secret,
                       --labels, --env.  Unrecognised flags are silently dropped.
     """
-    return await _oc_new_build(name, strategy, image_stream, binary, extra_flags)
+    logger.info("TOOL oc_new_build  name=%r  strategy=%r  image_stream=%r  binary=%s", name, strategy, image_stream, binary)
+    start = time.monotonic()
+    try:
+        result = await _oc_new_build(name, strategy, image_stream, binary, extra_flags)
+        logger.info("TOOL oc_new_build OK  name=%r  elapsed=%.1fs", name, time.monotonic() - start)
+        return result
+    except Exception as exc:
+        logger.error("TOOL oc_new_build ERROR  name=%r  elapsed=%.1fs  error=%s", name, time.monotonic() - start, exc)
+        raise
 
 
 @mcp.tool()
@@ -100,7 +123,18 @@ async def oc_start_build(buildconfig: str, commit: str | None = None) -> dict:
         buildconfig: Name of the BuildConfig to start.
         commit:      Optional git commit ref to build from.
     """
-    return await _oc_start_build(buildconfig, commit)
+    logger.info("TOOL oc_start_build  buildconfig=%r  commit=%r", buildconfig, commit)
+    start = time.monotonic()
+    try:
+        result = await _oc_start_build(buildconfig, commit)
+        logger.info(
+            "TOOL oc_start_build OK  buildconfig=%r  build_name=%r  elapsed=%.1fs",
+            buildconfig, result.get("build_name"), time.monotonic() - start,
+        )
+        return result
+    except Exception as exc:
+        logger.error("TOOL oc_start_build ERROR  buildconfig=%r  elapsed=%.1fs  error=%s", buildconfig, time.monotonic() - start, exc)
+        raise
 
 
 @mcp.tool()
@@ -123,7 +157,18 @@ async def wait_for_build(
         timeout_seconds:       Maximum seconds to wait (default 3600; max 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).
     """
-    return await _wait_for_build(build_name, timeout_seconds, poll_interval_seconds)
+    logger.info("TOOL wait_for_build  build=%r  timeout=%ds  interval=%ds", build_name, timeout_seconds, poll_interval_seconds)
+    start = time.monotonic()
+    try:
+        result = await _wait_for_build(build_name, timeout_seconds, poll_interval_seconds)
+        logger.info(
+            "TOOL wait_for_build DONE  build=%r  phase=%r  success=%s  elapsed=%.1fs",
+            build_name, result.get("phase"), result.get("success"), time.monotonic() - start,
+        )
+        return result
+    except Exception as exc:
+        logger.error("TOOL wait_for_build ERROR  build=%r  elapsed=%.1fs  error=%s", build_name, time.monotonic() - start, exc)
+        raise
 
 
 @mcp.tool()
@@ -148,23 +193,76 @@ async def helm_install(
         values_files: Optional list of values file paths relative to
                       WORKSPACE_ROOT, applied in order as -f arguments.
     """
-    return await _helm_install(release_name, chart_path, values_files)
+    logger.info("TOOL helm_install  release=%r  chart_path=%r  values_files=%r", release_name, chart_path, values_files)
+    start = time.monotonic()
+    try:
+        result = await _helm_install(release_name, chart_path, values_files)
+        logger.info("TOOL helm_install OK  release=%r  elapsed=%.1fs", release_name, time.monotonic() - start)
+        return result
+    except Exception as exc:
+        logger.error("TOOL helm_install ERROR  release=%r  elapsed=%.1fs  error=%s", release_name, time.monotonic() - start, exc)
+        raise
 
 
 # ---------------------------------------------------------------------------
-# Bearer auth middleware (optional)
+# Middleware
 # ---------------------------------------------------------------------------
 
-class _BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests that do not carry the expected bearer token."""
+class _RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log every inbound HTTP request and its response status + timing."""
 
-    def __init__(self, app, token: str) -> None:
-        super().__init__(app)
-        self._token = token
+    # Headers whose values should not appear in logs.
+    _REDACT = {"x-api-key", "authorization", "cookie"}
 
     async def dispatch(self, request: Request, call_next):
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != self._token:
+        start = time.monotonic()
+        client = request.client.host if request.client else "unknown"
+
+        # Log safe subset of headers at DEBUG level.
+        safe_headers = {
+            k: ("***" if k.lower() in self._REDACT else v)
+            for k, v in request.headers.items()
+        }
+        logger.debug(
+            "→ %s %s  client=%s  headers=%s",
+            request.method, request.url.path, client, safe_headers,
+        )
+        logger.info("→ %s %s  client=%s", request.method, request.url.path, client)
+
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            elapsed = round((time.monotonic() - start) * 1000)
+            logger.error(
+                "← %s %s  EXCEPTION  elapsed=%dms  error=%s",
+                request.method, request.url.path, elapsed, exc,
+            )
+            raise
+
+        elapsed = round((time.monotonic() - start) * 1000)
+        level = logging.WARNING if response.status_code >= 400 else logging.INFO
+        logger.log(
+            level,
+            "← %s %s  status=%d  elapsed=%dms",
+            request.method, request.url.path, response.status_code, elapsed,
+        )
+        return response
+
+
+class _ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Reject requests that do not carry the expected X-API-Key header value."""
+
+    def __init__(self, app, api_key: str) -> None:
+        super().__init__(app)
+        self._api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        if request.headers.get("X-API-Key") != self._api_key:
+            logger.warning(
+                "Unauthorized request  method=%s  path=%s  client=%s",
+                request.method, request.url.path,
+                request.client.host if request.client else "unknown",
+            )
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
@@ -176,23 +274,28 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
 def create_app():
     """Build and return the ASGI application.
 
-    Wraps the FastMCP Streamable HTTP app with bearer auth middleware when
-    MCP_BEARER_TOKEN is set.
+    Middleware stack (outermost → innermost):
+      _RequestLoggingMiddleware  — logs every request/response
+      _ApiKeyMiddleware          — enforces X-API-Key when MCP_API_KEY is set
+      FastMCP streamable_http_app
     """
     bootstrap_kubeconfig()
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
     app = mcp.streamable_http_app()
 
-    bearer_token = os.environ.get("MCP_BEARER_TOKEN")
-    if bearer_token:
-        app = _BearerAuthMiddleware(app, bearer_token)
-        logger.info("Bearer authentication enabled")
+    api_key = os.environ.get("MCP_API_KEY")
+    if api_key:
+        app = _ApiKeyMiddleware(app, api_key)
+        logger.info("X-API-Key authentication enabled")
     else:
         logger.warning(
-            "MCP_BEARER_TOKEN is not set — the MCP endpoint is unauthenticated. "
+            "MCP_API_KEY is not set — the MCP endpoint is unauthenticated. "
             "This is only acceptable when the server is not reachable externally."
         )
+
+    # Request logger wraps everything so all requests (including 401s) are logged.
+    app = _RequestLoggingMiddleware(app)
 
     return app
 
@@ -200,18 +303,17 @@ def create_app():
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
-    host = os.environ.get("BIND_HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
 
     logger.info(
-        "Starting MCP OCP server on %s:%d  workspace=%s  namespace=%s",
-        host, port, WORKSPACE_ROOT, os.environ.get("POD_NAMESPACE", "default"),
+        "Starting MCP OCP server  bind=%s:%d  workspace=%s  namespace=%s",
+        _BIND_HOST, port, WORKSPACE_ROOT, os.environ.get("POD_NAMESPACE", "default"),
     )
 
-    uvicorn.run(create_app(), host=host, port=port)
+    uvicorn.run(create_app(), host=_BIND_HOST, port=port)
 
 
 if __name__ == "__main__":

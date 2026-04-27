@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 
 from ..runner import confined_path, run
 
@@ -39,7 +40,14 @@ async def helm_install(
         RuntimeError: If helm exits non-zero after exhausting retries.
         ValueError:   If any path escapes WORKSPACE_ROOT.
     """
+    logger.info(
+        "helm_install called  release=%r  chart_path=%r  values_files=%r  namespace=%s",
+        release_name, chart_path, values_files, NAMESPACE,
+    )
+
     chart_dir = confined_path(chart_path)
+    logger.debug("Resolved chart dir: %s  (exists=%s)", chart_dir, chart_dir.exists())
+
     argv = [
         "helm", "upgrade", "--install",
         release_name, str(chart_dir),
@@ -49,11 +57,22 @@ async def helm_install(
     if values_files:
         for vf in values_files:
             vf_path = confined_path(vf)
+            logger.debug("Values file: %s", vf_path)
             argv += ["-f", str(vf_path)]
 
+    logger.debug("helm argv: %s", argv)
+    start = time.monotonic()
     result = await run(argv)
+    elapsed = round(time.monotonic() - start, 1)
+
     if result.exit_code != 0:
+        logger.error(
+            "helm_install FAILED  release=%r  exit=%d  elapsed=%.1fs\nstdout: %s\nstderr: %s",
+            release_name, result.exit_code, elapsed, result.stdout, result.stderr,
+        )
         raise RuntimeError(
             f"helm upgrade --install failed (exit {result.exit_code}):\n{result.stderr}"
         )
+
+    logger.info("helm_install OK  release=%r  namespace=%s  elapsed=%.1fs", release_name, NAMESPACE, elapsed)
     return result.stdout
