@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-ocp-server"
+version = "0.1.0"
+description = "MCP server for OpenShift builds and Helm deployments over Streamable HTTP"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.9.0",
+    "uvicorn[standard]>=0.29.0",
+    "starlette>=0.37.0",
+    "anyio>=4.0.0",
+]
+
+[project.scripts]
+mcp-ocp-server = "mcp_ocp_server.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_ocp_server"]

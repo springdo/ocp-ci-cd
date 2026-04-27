@@ -1,0 +1,18 @@
+{{- if eq .Values.workspace.storageType "pvc" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mcp-server.fullname" . }}-workspace
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-server.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.workspace.pvc.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.workspace.pvc.size }}
+  {{- if .Values.workspace.pvc.storageClass }}
+  storageClassName: {{ .Values.workspace.pvc.storageClass }}
+  {{- end }}
+{{- end }}

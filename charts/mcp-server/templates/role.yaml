@@ -1,0 +1,74 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mcp-server.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-server.labels" . | nindent 4 }}
+rules:
+  # -----------------------------------------------------------------------
+  # OpenShift Build API — required by oc_new_build, oc_start_build,
+  # and wait_for_build tools.
+  # -----------------------------------------------------------------------
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs", "buildconfigs/instantiate"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["build.openshift.io"]
+    resources: ["builds", "builds/log"]
+    verbs: ["get", "list", "watch"]
+  # build/log allows `oc logs build/<name>` for debugging failures.
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildlogs"]
+    verbs: ["get"]
+
+  # -----------------------------------------------------------------------
+  # Image streams — needed when new-build pushes to an ImageStream tag.
+  # -----------------------------------------------------------------------
+  - apiGroups: ["image.openshift.io"]
+    resources: ["imagestreams", "imagestreamtags", "imagestreamimages"]
+    verbs: ["get", "list", "create", "update", "patch"]
+
+  # -----------------------------------------------------------------------
+  # Core resources frequently referenced by build configs and Helm charts.
+  # -----------------------------------------------------------------------
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+  # -----------------------------------------------------------------------
+  # Workloads — common Helm chart targets.
+  # -----------------------------------------------------------------------
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+  # -----------------------------------------------------------------------
+  # OpenShift Route — helm_install may create Routes.
+  # -----------------------------------------------------------------------
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes", "routes/custom-host"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+  # -----------------------------------------------------------------------
+  # RBAC — Helm charts that create Roles/RoleBindings need these.
+  # (helm install with --wait reads events)
+  # -----------------------------------------------------------------------
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # -----------------------------------------------------------------------
+  # Extra rules — extend via values.rbac.extraRules for app-specific needs.
+  # -----------------------------------------------------------------------
+  {{- with .Values.rbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}

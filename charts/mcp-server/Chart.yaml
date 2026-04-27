@@ -1,0 +1,11 @@
+apiVersion: v2
+name: mcp-server
+description: MCP server for OpenShift builds and Helm deployments over Streamable HTTP
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mcp
+  - openshift
+  - ci-cd
+  - helm

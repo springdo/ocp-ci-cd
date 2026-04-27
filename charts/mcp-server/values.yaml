@@ -1,0 +1,78 @@
+# Default values for mcp-server.
+# Override with: helm install mcp-server ./charts/mcp-server -f my-values.yaml
+
+image:
+  # Set to your registry path, e.g. quay.io/myorg/mcp-ocp-server
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8000
+
+# ---------------------------------------------------------------------------
+# OpenShift Route — edge TLS termination.  No Ingress resource is created.
+# ---------------------------------------------------------------------------
+route:
+  enabled: true
+  # Leave empty to let the OpenShift router assign a hostname automatically.
+  host: ""
+  tls:
+    termination: edge
+    # Redirect plain HTTP to HTTPS.
+    insecureEdgeTerminationPolicy: Redirect
+  # Increase the route timeout for long-running wait_for_build calls.
+  # Value must be a duration string understood by HAProxy, e.g. "3600s".
+  timeoutAnnotation: "3600s"
+
+# ---------------------------------------------------------------------------
+# Workspace storage — used for git clones and Helm chart paths.
+# ---------------------------------------------------------------------------
+workspace:
+  # "emptyDir": ephemeral, lost on pod restart.
+  # "pvc": persistent — fills in a PersistentVolumeClaim.
+  storageType: emptyDir
+  pvc:
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# ---------------------------------------------------------------------------
+# Application environment variables.
+# MCP_BEARER_TOKEN should be supplied at deploy time via a Secret, not here.
+# ---------------------------------------------------------------------------
+env:
+  LOG_LEVEL: INFO
+  # POD_NAMESPACE is injected automatically via the Downward API — do not set here.
+
+# Supply bearer token as a Kubernetes Secret and reference it here:
+# bearerTokenSecret:
+#   name: mcp-bearer-token
+#   key: token
+bearerTokenSecret: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# RBAC
+# ---------------------------------------------------------------------------
+rbac:
+  # Extra Role rules appended to the default build/helm rules.
+  # Use this when your application Helm chart creates resource types not
+  # covered by the default Role (e.g. CRDs, ClusterRoles, etc.).
+  # All rules are namespaced — ClusterRole bindings are not created.
+  #
+  # Example:
+  #   extraRules:
+  #     - apiGroups: ["apps"]
+  #       resources: ["statefulsets"]
+  #       verbs: ["get", "list", "create", "update", "patch", "delete"]
+  extraRules: []
