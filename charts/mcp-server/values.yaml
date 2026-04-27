@@ -3,9 +3,9 @@
 
 image:
   # Set to your registry path, e.g. quay.io/myorg/mcp-ocp-server
-  repository: ""
+  repository: "quay.io/springdo/ocp-ci-cd"
   tag: "latest"
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 replicaCount: 1
 
