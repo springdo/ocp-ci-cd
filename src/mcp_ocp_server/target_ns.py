@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 
 from .runner import run
 
@@ -10,31 +11,59 @@ logger = logging.getLogger(__name__)
 _ensured_namespaces: set[str] = set()
 
 
+def _namespace_from_oc_kubeconfig() -> str:
+    """Current namespace from ``oc``'s active context (local dev / demo)."""
+    try:
+        proc = subprocess.run(
+            ["oc", "config", "view", "--minify", "-o", "jsonpath={..namespace}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("Could not read namespace from oc kubeconfig: %s", exc)
+    return "default"
+
+
 def target_namespace() -> str:
     """Namespace for ``oc`` and ``helm`` tool calls.
 
     Resolution order:
 
-    1. ``OCP_TARGET_NAMESPACE`` — explicit override (e.g. always use ``prototypes``).
-    2. ``POD_NAMESPACE`` — Downward API when the server runs in-cluster.
-    3. ``prototypes`` — local / unset defaults.
+    1. ``OCP_TARGET_NAMESPACE`` — explicit override.
+    2. ``POD_NAMESPACE`` — the MCP pod's namespace (Downward API in-cluster).
+    3. Active ``oc`` context namespace from kubeconfig, then ``default`` if unknown.
     """
-    return os.environ.get(
-        "OCP_TARGET_NAMESPACE",
-        os.environ.get("POD_NAMESPACE", "prototypes"),
-    )
+    if os.environ.get("OCP_TARGET_NAMESPACE"):
+        return os.environ["OCP_TARGET_NAMESPACE"]
+    if os.environ.get("POD_NAMESPACE"):
+        return os.environ["POD_NAMESPACE"]
+    return _namespace_from_oc_kubeconfig()
 
 
 async def ensure_namespace_exists(ns: str) -> None:
     """Ensure namespace ``ns`` exists; create it if ``oc get`` says it does not.
 
-    Tries ``oc create namespace`` first (minimal kubeconfig churn), then
+    When ``ns`` equals ``POD_NAMESPACE`` (the MCP pod's own namespace), this is a
+    no-op: the namespace already exists and typical namespaced ServiceAccounts
+    cannot ``get`` cluster-scoped ``Namespace`` objects anyway.
+
+    Otherwise tries ``oc create namespace`` first (minimal kubeconfig churn), then
     ``oc new-project`` for OpenShift environments where the former is not allowed.
 
     Idempotent per process: skips work if we already ensured ``ns`` in this
     interpreter. Concurrent creates may race; a follow-up ``oc get`` confirms.
     """
     if ns in _ensured_namespaces:
+        return
+
+    pod_ns = os.environ.get("POD_NAMESPACE")
+    if pod_ns and ns == pod_ns:
+        logger.debug("ensure_namespace_exists: %r is the pod namespace — skipping check/create", ns)
+        _ensured_namespaces.add(ns)
         return
 
     check = await run(["oc", "get", "namespace", ns, "-o", "name"])

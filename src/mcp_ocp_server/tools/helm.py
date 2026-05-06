@@ -19,9 +19,10 @@ async def helm_install(
     Uses `helm upgrade --install` (idempotent) so the tool is safe to call
     on both first installs and subsequent updates.
 
-    Namespace resolution matches ``oc`` tools (see ``target_namespace`` in
-    ``target_ns``): ``OCP_TARGET_NAMESPACE``, then ``POD_NAMESPACE``, then
-    ``prototypes``. Cross-namespace installs beyond that are out of scope for v1.
+    Namespace resolution matches ``oc`` tools (see ``target_ns.target_namespace``):
+    ``OCP_TARGET_NAMESPACE``, then ``POD_NAMESPACE`` (pod namespace in-cluster),
+    then the active ``oc`` context namespace. Cross-namespace installs beyond
+    that are out of scope for v1.
 
     Args:
         release_name: Helm release name.

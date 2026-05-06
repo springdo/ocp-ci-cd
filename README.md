@@ -1,6 +1,6 @@
 # MCP OCP Server
 
-An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and run `git clone` → `oc new-build` → `oc start-build` → `wait_for_build` → `helm install` as natural-language-driven tool calls.
+An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and run `git clone` → `binary_docker_build` → `wait_for_build` → `helm install` as natural-language-driven tool calls.
 
 ## Prerequisites
 
@@ -17,8 +17,7 @@ An MCP server that exposes OpenShift build and Helm deployment operations over t
 | Tool | What it does |
 |------|-------------|
 | `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<local_path>`; optional GitHub PAT for private **HTTPS** repos |
-| `oc_new_build` | Create a BuildConfig via `oc new-build` (non-binary builds need a `context_path` under `WORKSPACE_ROOT`, default `.`) |
-| `oc_start_build` | Trigger a build; returns the build name for use with `wait_for_build` |
+| `binary_docker_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…` (two args: `name`, `git_workspace` under `WORKSPACE_ROOT`). Reuses existing BuildConfig if present. |
 | `wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
 | `helm_install` | `helm upgrade --install --wait` against a chart in `WORKSPACE_ROOT` |
 
@@ -56,7 +55,7 @@ http://127.0.0.1:8000/mcp
 | `PORT` | `8000` | HTTP port |
 | `WORKSPACE_ROOT` | `/tmp/workspace` | Base directory for clones and Helm charts |
 | `OCP_TARGET_NAMESPACE` | *(unset)* | If set, `oc` / `helm` use this namespace. Otherwise see `POD_NAMESPACE`. |
-| `POD_NAMESPACE` | `prototypes` (local) | In-cluster, injected by the Downward API. With no `OCP_TARGET_NAMESPACE`, this is the target namespace for tools; when unset locally, tools default to **`prototypes`**. |
+| `POD_NAMESPACE` | *(unset locally)* | In-cluster, injected by the Downward API — **the MCP pod's namespace**. With no `OCP_TARGET_NAMESPACE`, tools use this in-cluster; locally they use your **current `oc` context** namespace (then `default`). |
 | `KUBECONFIG` | *(auto in-cluster)* | Path to kubeconfig; auto-generated from SA token when running in a pod |
 | `MCP_API_KEY` | *(unset = no auth)* | When set, all requests must carry `X-API-Key: <value>` |
 | `GITHUB_TOKEN` | *(unset)* | GitHub personal access token for private **HTTPS** clones when the `git_clone` tool does not pass `github_token` |
@@ -73,11 +72,12 @@ SSH URLs are not altered; use SSH keys or an agent if you clone via `git@github.
 
 The container image sets default `git config` `user.name` / `user.email` to **OCP_BOT** / **OCP_BOT@orange-bank.ie** so git does not fail identity checks after clone.
 
-### OpenShift target namespace and `oc new-build`
+### OpenShift target namespace and `binary_docker_build`
 
-- **`oc` / `helm` tools** resolve the namespace as: `OCP_TARGET_NAMESPACE` → `POD_NAMESPACE` → **`prototypes`** (so local runs without env vars use `prototypes`).
-- Before `oc new-build`, `oc start-build`, `wait_for_build`, and `helm_install`, the server tries to **create the namespace** if it does not exist (`oc create namespace`, then `oc new-project` as a fallback). Your kube user or in-cluster ServiceAccount needs permission to create namespaces/projects.
-- If **`oc new-build` fails because the BuildConfig already exists**, the tool **returns success** with a short message that the existing BuildConfig is reused (after verifying it with `oc get buildconfig`).
+- **`oc` / `helm` tools** resolve the namespace as: `OCP_TARGET_NAMESPACE` → **`POD_NAMESPACE`** (the MCP pod's namespace when running in-cluster) → **active `oc` context** namespace when developing locally → `default` if that cannot be read.
+- Before `binary_docker_build`, `wait_for_build`, and `helm_install`, the server may **ensure the target namespace exists**. If the target is **the same as the MCP pod’s namespace** (`POD_NAMESPACE`), this step is skipped — no cluster-scoped `Namespace` GET is required. For **other** targets (`OCP_TARGET_NAMESPACE`), your identity needs permission to read or create namespaces/projects.
+- If **`oc new-build` fails because the BuildConfig already exists**, **`binary_docker_build`** still succeeds and runs **`oc start-build`** (after verifying the BuildConfig with `oc get buildconfig`).
+- Binary uploads (`oc start-build --from-dir`) need **`create`** on **`buildconfigs/instantiatebinary`** — the Helm chart `Role` includes this; re-apply the chart if you hit Forbidden on upload.
 
 ## Building the container image
 
@@ -213,9 +213,8 @@ For local development (no TLS, no auth):
 ## Typical end-to-end flow
 
 ```
-git_clone         Clone the application repo into WORKSPACE_ROOT
-oc_new_build      Create a BuildConfig (set context_path to the clone directory, e.g. myrepo, unless the Dockerfile is at WORKSPACE_ROOT)
-oc_start_build    Trigger the build → returns build_name
-wait_for_build    Block until build_name reaches Complete (or fail fast)
-helm_install      Deploy the Helm chart at the repo root into the pod namespace
+git_clone              Clone the application repo into WORKSPACE_ROOT/<local_path>
+binary_docker_build    name + git_workspace (clone dir); fixed binary/docker new-build then start-build --from-dir
+wait_for_build         Block until build_name reaches Complete (or fail fast)
+helm_install           Deploy the Helm chart at the repo root into the target namespace
 ```

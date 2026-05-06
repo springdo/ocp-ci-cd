@@ -50,8 +50,8 @@ env:
   MCP_API_KEY: "daffy-duck"
   # Optional: GitHub PAT for private HTTPS git_clone (see README). Prefer a Secret in production.
   # GITHUB_TOKEN: ""
-  # Optional: force oc/helm to use this namespace (default in app: POD_NAMESPACE from Downward API, else prototypes).
-  # OCP_TARGET_NAMESPACE: "prototypes"
+  # Optional: force oc/helm to use this namespace (default in app: POD_NAMESPACE = pod's namespace).
+  # OCP_TARGET_NAMESPACE: "other-ns"
 
 resources:
   requests:

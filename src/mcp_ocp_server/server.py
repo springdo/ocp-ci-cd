@@ -8,7 +8,7 @@ Environment variables:
     PORT                HTTP port (default: 8000)
     WORKSPACE_ROOT      Base directory for git clones / Helm chart paths
     POD_NAMESPACE       Used as target namespace for oc/helm when OCP_TARGET_NAMESPACE is unset (Downward API in-cluster)
-    OCP_TARGET_NAMESPACE  Optional override for oc/helm namespace (otherwise POD_NAMESPACE, else prototypes)
+    OCP_TARGET_NAMESPACE  Optional override for oc/helm namespace (otherwise POD_NAMESPACE, else active oc context)
     KUBECONFIG          Optional; auto-generated from SA token when running in-cluster
     MCP_API_KEY         When set, all requests must carry "X-API-Key: <value>"
     GITHUB_TOKEN        Optional; GitHub PAT for private HTTPS clones when git_clone omits github_token
@@ -30,8 +30,7 @@ from .runner import WORKSPACE_ROOT
 from .target_ns import target_namespace
 from .tools.git import git_clone as _git_clone
 from .tools.helm import helm_install as _helm_install
-from .tools.openshift import oc_new_build as _oc_new_build
-from .tools.openshift import oc_start_build as _oc_start_build
+from .tools.openshift import binary_docker_build as _binary_docker_build
 from .tools.openshift import wait_for_build as _wait_for_build
 
 logger = logging.getLogger(__name__)
@@ -50,8 +49,8 @@ mcp = FastMCP(
     host=_BIND_HOST,
     instructions=(
         "MCP server for OpenShift builds and Helm deployments. "
-        "Typical flow: git_clone → oc_new_build → oc_start_build → "
-        "wait_for_build → helm_install."
+        "Typical flow: git_clone → binary_docker_build → wait_for_build → "
+        "helm_install."
     ),
     stateless_http=True,
 )
@@ -101,69 +100,43 @@ async def git_clone(
 
 
 @mcp.tool()
-async def oc_new_build(
-    name: str,
-    strategy: str = "docker",
-    image_stream: str | None = None,
-    binary: bool = False,
-    context_path: str = ".",
-    extra_flags: list[str] | None = None,
-) -> str:
-    """Create a new BuildConfig on OpenShift via `oc new-build`.
+async def binary_docker_build(name: str, git_workspace: str) -> dict:
+    """Binary Docker build: ensure BuildConfig, then upload source and start a build.
+
+    Runs ``oc new-build --binary --name=<name> --strategy=docker`` then
+    ``oc start-build <name> --from-dir=<git_workspace>`` (paths under
+    ``WORKSPACE_ROOT``). If the BuildConfig already exists, new-build is skipped
+    and the start-build still runs.
+
+    Returns a dict with:
+    - ``build_name``: pass to ``wait_for_build``.
+    - ``reused_buildconfig``: True if the BuildConfig already existed.
+    - ``new_build``: new-build stdout or reuse message.
+    - ``start_build_output``: raw ``oc start-build`` stdout.
 
     Args:
-        name:          Name for the BuildConfig.
-        strategy:      Build strategy — 'docker' (default) or 'source'.
-        image_stream:  Optional builder image or image-stream tag,
-                       e.g. 'nodejs:18' or 'myapp:latest'.
-        binary:        If true, adds --binary for a binary-source build (no directory
-                       on new-build; use ``oc start-build --from-dir`` with the same
-                       ``context_path``).
-        context_path:  Directory under WORKSPACE_ROOT with the Dockerfile or source
-                       (default ``'.'``). After ``git_clone`` into ``myapp``, set this
-                       to ``myapp`` (or ``.`` if the clone target is the workspace root).
-        extra_flags:   Additional flags from a fixed allowlist:
-                       --context-dir, --to, --source-secret, --push-secret,
-                       --labels, --env.  Unrecognised flags are silently dropped.
+        name:           BuildConfig name (same for both oc commands).
+        git_workspace:  Directory under ``WORKSPACE_ROOT`` containing the Dockerfile
+                        (e.g. the same ``local_path`` used with ``git_clone``).
     """
-    logger.info(
-        "TOOL oc_new_build  name=%r  strategy=%r  image_stream=%r  binary=%s  context_path=%r",
-        name, strategy, image_stream, binary, context_path,
-    )
+    logger.info("TOOL binary_docker_build  name=%r  git_workspace=%r", name, git_workspace)
     start = time.monotonic()
     try:
-        result = await _oc_new_build(name, strategy, image_stream, binary, context_path, extra_flags)
-        logger.info("TOOL oc_new_build OK  name=%r  elapsed=%.1fs", name, time.monotonic() - start)
-        return result
-    except Exception as exc:
-        logger.error("TOOL oc_new_build ERROR  name=%r  elapsed=%.1fs  error=%s", name, time.monotonic() - start, exc)
-        raise
-
-
-@mcp.tool()
-async def oc_start_build(buildconfig: str, commit: str | None = None) -> dict:
-    """Trigger a build from an existing BuildConfig via `oc start-build`.
-
-    Returns a dict containing:
-    - ``build_name`` (str | None): the new build name (e.g. 'my-app-3').
-      Pass this directly to ``wait_for_build``.
-    - ``output`` (str): raw stdout from `oc start-build`.
-
-    Args:
-        buildconfig: Name of the BuildConfig to start.
-        commit:      Optional git commit ref to build from.
-    """
-    logger.info("TOOL oc_start_build  buildconfig=%r  commit=%r", buildconfig, commit)
-    start = time.monotonic()
-    try:
-        result = await _oc_start_build(buildconfig, commit)
+        result = await _binary_docker_build(name, git_workspace)
         logger.info(
-            "TOOL oc_start_build OK  buildconfig=%r  build_name=%r  elapsed=%.1fs",
-            buildconfig, result.get("build_name"), time.monotonic() - start,
+            "TOOL binary_docker_build OK  name=%r  build_name=%r  elapsed=%.1fs",
+            name,
+            result.get("build_name"),
+            time.monotonic() - start,
         )
         return result
     except Exception as exc:
-        logger.error("TOOL oc_start_build ERROR  buildconfig=%r  elapsed=%.1fs  error=%s", buildconfig, time.monotonic() - start, exc)
+        logger.error(
+            "TOOL binary_docker_build ERROR  name=%r  elapsed=%.1fs  error=%s",
+            name,
+            time.monotonic() - start,
+            exc,
+        )
         raise
 
 
@@ -182,7 +155,7 @@ async def wait_for_build(
     - ``elapsed_seconds`` (int): Wall-clock seconds spent waiting.
 
     Args:
-        build_name:            Full build name from ``oc_start_build`` output,
+        build_name:            Full build name from ``binary_docker_build`` output,
                                e.g. 'my-app-3'.
         timeout_seconds:       Maximum seconds to wait (default 3600; max 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).

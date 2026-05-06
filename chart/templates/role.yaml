@@ -7,12 +7,15 @@ metadata:
     {{- include "mcp-server.labels" . | nindent 4 }}
 rules:
   # -----------------------------------------------------------------------
-  # OpenShift Build API — required by oc_new_build, oc_start_build,
-  # and wait_for_build tools.
+  # OpenShift Build API — required by binary_docker_build, wait_for_build.
+  # instantiatebinary: oc start-build --from-dir (binary upload to the build).
   # -----------------------------------------------------------------------
   - apiGroups: ["build.openshift.io"]
     resources: ["buildconfigs", "buildconfigs/instantiate"]
     verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs/instantiatebinary"]
+    verbs: ["create"]
   - apiGroups: ["build.openshift.io"]
     resources: ["builds", "builds/log"]
     verbs: ["get", "list", "watch"]
