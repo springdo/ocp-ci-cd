@@ -7,9 +7,11 @@ Environment variables:
     BIND_HOST           Bind address (default: 0.0.0.0)
     PORT                HTTP port (default: 8000)
     WORKSPACE_ROOT      Base directory for git clones / Helm chart paths
-    POD_NAMESPACE       Target OpenShift namespace (injected by Downward API in-cluster)
+    POD_NAMESPACE       Used as target namespace for oc/helm when OCP_TARGET_NAMESPACE is unset (Downward API in-cluster)
+    OCP_TARGET_NAMESPACE  Optional override for oc/helm namespace (otherwise POD_NAMESPACE, else prototypes)
     KUBECONFIG          Optional; auto-generated from SA token when running in-cluster
     MCP_API_KEY         When set, all requests must carry "X-API-Key: <value>"
+    GITHUB_TOKEN        Optional; GitHub PAT for private HTTPS clones when git_clone omits github_token
     LOG_LEVEL           Python logging level (default: INFO; set DEBUG for full traces)
 """
 
@@ -25,6 +27,7 @@ from starlette.responses import JSONResponse
 
 from .kubeconfig import bootstrap_kubeconfig
 from .runner import WORKSPACE_ROOT
+from .target_ns import target_namespace
 from .tools.git import git_clone as _git_clone
 from .tools.helm import helm_install as _helm_install
 from .tools.openshift import oc_new_build as _oc_new_build
@@ -59,19 +62,37 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def git_clone(repo_url: str, local_path: str, branch: str | None = None) -> str:
+async def git_clone(
+    repo_url: str,
+    local_path: str,
+    branch: str | None = None,
+    github_token: str | None = None,
+) -> str:
     """Clone a git repository into WORKSPACE_ROOT/<local_path>.
 
     Args:
-        repo_url:   The remote URL to clone from (https or ssh).
-        local_path: Destination directory name, relative to WORKSPACE_ROOT.
-                    Must not contain '..' or resolve outside WORKSPACE_ROOT.
-        branch:     Optional branch, tag, or commit ref to check out.
+        repo_url:      The remote URL to clone from (https or ssh).
+        local_path:    Destination directory name, relative to WORKSPACE_ROOT.
+                       Must not contain '..' or resolve outside WORKSPACE_ROOT.
+        branch:        Optional branch, tag, or commit ref to check out.
+        github_token:  Optional GitHub PAT for private HTTPS repos. When omitted,
+                       ``GITHUB_TOKEN`` from the environment is used if set.
+                       SSH URLs are unchanged (use deploy keys or an SSH agent).
     """
-    logger.info("TOOL git_clone  repo=%s  local_path=%r  branch=%r", repo_url, local_path, branch)
+    has_token = bool(
+        (github_token and github_token.strip())
+        or (os.environ.get("GITHUB_TOKEN") or "").strip()
+    )
+    logger.info(
+        "TOOL git_clone  repo=%s  local_path=%r  branch=%r  github_token=%s",
+        repo_url,
+        local_path,
+        branch,
+        "set" if has_token else "unset",
+    )
     start = time.monotonic()
     try:
-        result = await _git_clone(repo_url, local_path, branch)
+        result = await _git_clone(repo_url, local_path, branch, github_token)
         logger.info("TOOL git_clone OK  elapsed=%.1fs", time.monotonic() - start)
         return result
     except Exception as exc:
@@ -85,24 +106,33 @@ async def oc_new_build(
     strategy: str = "docker",
     image_stream: str | None = None,
     binary: bool = False,
+    context_path: str = ".",
     extra_flags: list[str] | None = None,
 ) -> str:
     """Create a new BuildConfig on OpenShift via `oc new-build`.
 
     Args:
-        name:         Name for the BuildConfig.
-        strategy:     Build strategy — 'docker' (default) or 'source'.
-        image_stream: Optional image-stream tag to build from or to,
-                      e.g. 'nodejs:18' or 'myapp:latest'.
-        binary:       If true, adds --binary for a binary-source build.
-        extra_flags:  Additional flags from a fixed allowlist:
-                      --context-dir, --to, --source-secret, --push-secret,
-                      --labels, --env.  Unrecognised flags are silently dropped.
+        name:          Name for the BuildConfig.
+        strategy:      Build strategy — 'docker' (default) or 'source'.
+        image_stream:  Optional builder image or image-stream tag,
+                       e.g. 'nodejs:18' or 'myapp:latest'.
+        binary:        If true, adds --binary for a binary-source build (no directory
+                       on new-build; use ``oc start-build --from-dir`` with the same
+                       ``context_path``).
+        context_path:  Directory under WORKSPACE_ROOT with the Dockerfile or source
+                       (default ``'.'``). After ``git_clone`` into ``myapp``, set this
+                       to ``myapp`` (or ``.`` if the clone target is the workspace root).
+        extra_flags:   Additional flags from a fixed allowlist:
+                       --context-dir, --to, --source-secret, --push-secret,
+                       --labels, --env.  Unrecognised flags are silently dropped.
     """
-    logger.info("TOOL oc_new_build  name=%r  strategy=%r  image_stream=%r  binary=%s", name, strategy, image_stream, binary)
+    logger.info(
+        "TOOL oc_new_build  name=%r  strategy=%r  image_stream=%r  binary=%s  context_path=%r",
+        name, strategy, image_stream, binary, context_path,
+    )
     start = time.monotonic()
     try:
-        result = await _oc_new_build(name, strategy, image_stream, binary, extra_flags)
+        result = await _oc_new_build(name, strategy, image_stream, binary, context_path, extra_flags)
         logger.info("TOOL oc_new_build OK  name=%r  elapsed=%.1fs", name, time.monotonic() - start)
         return result
     except Exception as exc:
@@ -309,8 +339,8 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
 
     logger.info(
-        "Starting MCP OCP server  bind=%s:%d  workspace=%s  namespace=%s",
-        _BIND_HOST, port, WORKSPACE_ROOT, os.environ.get("POD_NAMESPACE", "default"),
+        "Starting MCP OCP server  bind=%s:%d  workspace=%s  target_namespace=%s",
+        _BIND_HOST, port, WORKSPACE_ROOT, target_namespace(),
     )
 
     uvicorn.run(create_app(), host=_BIND_HOST, port=port)

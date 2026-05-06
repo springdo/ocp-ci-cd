@@ -1,5 +1,5 @@
 # Default values for mcp-server.
-# Override with: helm install mcp-server ./charts/mcp-server -f my-values.yaml
+# Override with: helm install mcp-server ./chart -f my-values.yaml
 
 image:
   # Set to your registry path, e.g. quay.io/myorg/mcp-ocp-server
@@ -45,9 +45,13 @@ workspace:
 env:
   LOG_LEVEL: INFO
   # POD_NAMESPACE is injected automatically via the Downward API — do not set here.
-  # Bearer token for MCP endpoint authentication.
-  # Override this value at deploy time — do not commit a production token here.
-  MCP_BEARER_TOKEN: "daffy-duck"
+  # API key for MCP endpoint authentication (sent via X-API-Key header).
+  # Test-only default; replace for non-test deployments.
+  MCP_API_KEY: "daffy-duck"
+  # Optional: GitHub PAT for private HTTPS git_clone (see README). Prefer a Secret in production.
+  # GITHUB_TOKEN: ""
+  # Optional: force oc/helm to use this namespace (default in app: POD_NAMESPACE from Downward API, else prototypes).
+  # OCP_TARGET_NAMESPACE: "prototypes"
 
 resources:
   requests:

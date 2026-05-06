@@ -50,9 +50,17 @@ spec:
             - name: LOG_LEVEL
               value: {{ .Values.env.LOG_LEVEL | quote }}
             {{- end }}
-            {{- if .Values.env.MCP_BEARER_TOKEN }}
-            - name: MCP_BEARER_TOKEN
-              value: {{ .Values.env.MCP_BEARER_TOKEN | quote }}
+            {{- if .Values.env.MCP_API_KEY }}
+            - name: MCP_API_KEY
+              value: {{ .Values.env.MCP_API_KEY | quote }}
+            {{- end }}
+            {{- if .Values.env.GITHUB_TOKEN }}
+            - name: GITHUB_TOKEN
+              value: {{ .Values.env.GITHUB_TOKEN | quote }}
+            {{- end }}
+            {{- if .Values.env.OCP_TARGET_NAMESPACE }}
+            - name: OCP_TARGET_NAMESPACE
+              value: {{ .Values.env.OCP_TARGET_NAMESPACE | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

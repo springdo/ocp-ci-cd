@@ -2,22 +2,26 @@
 
 import asyncio
 import logging
-import os
 import re
 import time
 
-from ..runner import run
+from ..runner import confined_path, run
+from ..target_ns import ensure_namespace_exists, target_namespace
 
 logger = logging.getLogger(__name__)
-
-# Injected from the Downward API (fieldRef: metadata.namespace) in the Helm chart.
-# Falls back to "default" for local development.
-NAMESPACE = os.environ.get("POD_NAMESPACE", "default")
 
 _TERMINAL_PHASES = {"Complete", "Failed", "Cancelled", "Error"}
 _RUNNING_PHASES = {"New", "Pending", "Running"}
 
 # Allowlist of flags that may be forwarded to oc new-build.
+def _new_build_bc_already_exists(stderr: str, stdout: str) -> bool:
+    """True if oc new-build output indicates the BuildConfig already exists."""
+    combined = f"{stderr}\n{stdout}".lower()
+    if "already exists" not in combined and "alreadyexist" not in combined:
+        return False
+    return "buildconfig" in combined
+
+
 _NEW_BUILD_FLAG_PREFIXES = (
     "--context-dir=",
     "--to=",
@@ -33,19 +37,24 @@ async def oc_new_build(
     strategy: str = "docker",
     image_stream: str | None = None,
     binary: bool = False,
+    context_path: str = ".",
     extra_flags: list[str] | None = None,
 ) -> str:
     """Create a new BuildConfig via `oc new-build`.
 
     Args:
-        name:         Name for the BuildConfig.
-        strategy:     Build strategy — 'docker' or 'source'.
-        image_stream: Optional image-stream tag, e.g. 'nodejs:18' or 'myapp:latest'.
-        binary:       If true, add --binary for a binary-source build.
-        extra_flags:  Optional list of additional flags from a fixed allowlist
-                      (--context-dir, --to, --source-secret, --push-secret,
-                      --labels, --env).  Any flag not on the allowlist is silently
-                      dropped to prevent injection.
+        name:          Name for the BuildConfig.
+        strategy:      Build strategy — 'docker' or 'source'.
+        image_stream:  Optional builder image or image-stream tag, e.g. 'nodejs:18'.
+        binary:        If true, use ``--binary`` (no directory source on new-build;
+                       follow with ``oc start-build --from-dir`` using the same context).
+        context_path:  Directory under WORKSPACE_ROOT containing the Dockerfile or
+                       source (default ``'.'``). Required for non-binary builds so
+                       ``oc`` receives a source location. Ignored when ``binary`` is true.
+        extra_flags:   Optional list of additional flags from a fixed allowlist
+                       (--context-dir, --to, --source-secret, --push-secret,
+                       --labels, --env).  Any flag not on the allowlist is silently
+                       dropped to prevent injection.
 
     Returns:
         stdout from `oc new-build`.
@@ -53,16 +62,26 @@ async def oc_new_build(
     Raises:
         RuntimeError: If the command exits non-zero.
     """
+    ns = target_namespace()
     logger.info(
-        "oc_new_build called  name=%r  strategy=%r  image_stream=%r  binary=%s  namespace=%s",
-        name, strategy, image_stream, binary, NAMESPACE,
+        "oc_new_build called  name=%r  strategy=%r  image_stream=%r  binary=%s  context_path=%r  namespace=%s",
+        name, strategy, image_stream, binary, context_path, ns,
     )
 
-    argv = ["oc", "new-build", f"--name={name}", f"--strategy={strategy}", "-n", NAMESPACE]
-    if image_stream:
-        argv.append(image_stream)
+    await ensure_namespace_exists(ns)
+
     if binary:
+        argv = ["oc", "new-build", f"--name={name}", f"--strategy={strategy}", "-n", ns]
+        if image_stream:
+            argv.append(image_stream)
         argv.append("--binary")
+    else:
+        ctx = str(confined_path(context_path))
+        argv = ["oc", "new-build"]
+        if image_stream:
+            argv.append(image_stream)
+        argv.append(ctx)
+        argv.extend([f"--name={name}", f"--strategy={strategy}", "-n", ns])
     if extra_flags:
         for flag in extra_flags:
             if any(flag.startswith(prefix) for prefix in _NEW_BUILD_FLAG_PREFIXES):
@@ -74,6 +93,16 @@ async def oc_new_build(
     result = await run(argv)
 
     if result.exit_code != 0:
+        if _new_build_bc_already_exists(result.stderr, result.stdout):
+            verify = await run(["oc", "get", "buildconfig", name, "-n", ns, "-o", "name"])
+            if verify.exit_code == 0:
+                msg = (
+                    f'BuildConfig "{name}" already exists in namespace "{ns}". '
+                    "Reusing it — no new BuildConfig was created. "
+                    "Use oc_start_build to trigger a build when ready."
+                )
+                logger.info("oc_new_build: %s", msg)
+                return msg
         logger.error(
             "oc_new_build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
             name, result.exit_code, result.stdout, result.stderr,
@@ -105,12 +134,15 @@ async def oc_start_build(
     Raises:
         RuntimeError: If the command exits non-zero.
     """
+    ns = target_namespace()
     logger.info(
         "oc_start_build called  buildconfig=%r  commit=%r  namespace=%s",
-        buildconfig, commit, NAMESPACE,
+        buildconfig, commit, ns,
     )
 
-    argv = ["oc", "start-build", buildconfig, "-n", NAMESPACE]
+    await ensure_namespace_exists(ns)
+
+    argv = ["oc", "start-build", buildconfig, "-n", ns]
     if commit:
         argv += ["--commit", commit]
 
@@ -178,16 +210,19 @@ async def wait_for_build(
     message = ""
     poll_count = 0
 
+    ns = target_namespace()
     logger.info(
         "wait_for_build called  build=%r  timeout=%ds  interval=%ds  namespace=%s",
-        build_name, timeout_seconds, poll_interval_seconds, NAMESPACE,
+        build_name, timeout_seconds, poll_interval_seconds, ns,
     )
+
+    await ensure_namespace_exists(ns)
 
     while time.monotonic() < deadline:
         poll_count += 1
         result = await run([
             "oc", "get", f"build/{build_name}",
-            "-n", NAMESPACE,
+            "-n", ns,
             "-o", r"jsonpath={.status.phase}|{.status.message}",
         ])
 

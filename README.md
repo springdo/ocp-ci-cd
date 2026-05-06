@@ -16,8 +16,8 @@ An MCP server that exposes OpenShift build and Helm deployment operations over t
 
 | Tool | What it does |
 |------|-------------|
-| `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<local_path>` |
-| `oc_new_build` | Create a BuildConfig via `oc new-build` |
+| `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<local_path>`; optional GitHub PAT for private **HTTPS** repos |
+| `oc_new_build` | Create a BuildConfig via `oc new-build` (non-binary builds need a `context_path` under `WORKSPACE_ROOT`, default `.`) |
 | `oc_start_build` | Trigger a build; returns the build name for use with `wait_for_build` |
 | `wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
 | `helm_install` | `helm upgrade --install --wait` against a chart in `WORKSPACE_ROOT` |
@@ -38,11 +38,11 @@ Log in to OpenShift first, then start the server:
 oc login --token=<token> --server=https://api.mycluster.example.com:6443
 
 WORKSPACE_ROOT=/tmp/mcp-workspace \
-MCP_BEARER_TOKEN=my-secret-token \
+MCP_API_KEY=my-secret-token \
 mcp-ocp-server
 ```
 
-The server binds to `127.0.0.1:8000` by default. The MCP endpoint is at:
+The server binds to `0.0.0.0:8000` by default. For local access, use:
 
 ```
 http://127.0.0.1:8000/mcp
@@ -52,13 +52,32 @@ http://127.0.0.1:8000/mcp
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BIND_HOST` | `127.0.0.1` | Set to `0.0.0.0` in containers |
+| `BIND_HOST` | `0.0.0.0` | Bind address (`127.0.0.1` is useful for localhost-only local dev) |
 | `PORT` | `8000` | HTTP port |
 | `WORKSPACE_ROOT` | `/tmp/workspace` | Base directory for clones and Helm charts |
-| `POD_NAMESPACE` | `default` | Target OpenShift namespace for `oc` / `helm` |
+| `OCP_TARGET_NAMESPACE` | *(unset)* | If set, `oc` / `helm` use this namespace. Otherwise see `POD_NAMESPACE`. |
+| `POD_NAMESPACE` | `prototypes` (local) | In-cluster, injected by the Downward API. With no `OCP_TARGET_NAMESPACE`, this is the target namespace for tools; when unset locally, tools default to **`prototypes`**. |
 | `KUBECONFIG` | *(auto in-cluster)* | Path to kubeconfig; auto-generated from SA token when running in a pod |
-| `MCP_BEARER_TOKEN` | *(unset = no auth)* | When set, all requests must carry `Authorization: Bearer <value>` |
+| `MCP_API_KEY` | *(unset = no auth)* | When set, all requests must carry `X-API-Key: <value>` |
+| `GITHUB_TOKEN` | *(unset)* | GitHub personal access token for private **HTTPS** clones when the `git_clone` tool does not pass `github_token` |
 | `LOG_LEVEL` | `INFO` | Python logging level |
+
+### Private GitHub repositories
+
+Use an **HTTPS** URL (for example `https://github.com/org/private-repo.git`). Either:
+
+- set `GITHUB_TOKEN` in the environment (recommended for OpenShift — inject from a Secret), or
+- pass `github_token` on the `git_clone` tool call (avoid logging it in untrusted clients).
+
+SSH URLs are not altered; use SSH keys or an agent if you clone via `git@github.com:...`.
+
+The container image sets default `git config` `user.name` / `user.email` to **OCP_BOT** / **OCP_BOT@orange-bank.ie** so git does not fail identity checks after clone.
+
+### OpenShift target namespace and `oc new-build`
+
+- **`oc` / `helm` tools** resolve the namespace as: `OCP_TARGET_NAMESPACE` → `POD_NAMESPACE` → **`prototypes`** (so local runs without env vars use `prototypes`).
+- Before `oc new-build`, `oc start-build`, `wait_for_build`, and `helm_install`, the server tries to **create the namespace** if it does not exist (`oc create namespace`, then `oc new-project` as a fallback). Your kube user or in-cluster ServiceAccount needs permission to create namespaces/projects.
+- If **`oc new-build` fails because the BuildConfig already exists**, the tool **returns success** with a short message that the existing BuildConfig is reused (after verifying it with `oc get buildconfig`).
 
 ## Building the container image
 
@@ -75,23 +94,35 @@ The image is based on **Red Hat UBI 9 / Python 3.11**, runs as UID 1001 (non-roo
 
 ## Deploying to OpenShift with Helm
 
-### 1. Create a bearer-token Secret
+### 1. Choose an API key value
 
 ```bash
-oc create secret generic mcp-bearer-token \
-  --from-literal=token=$(openssl rand -hex 32) \
-  -n my-namespace
+export MCP_API_KEY="daffy-duck"
 ```
 
 ### 2. Install the Helm chart
 
 ```bash
-helm upgrade --install mcp-server ./charts/mcp-server \
+helm upgrade --install mcp-server ./chart \
   -n my-namespace \
   --set image.repository=quay.io/myorg/mcp-ocp-server \
   --set image.tag=latest \
-  --set bearerTokenSecret.name=mcp-bearer-token
+  --set env.MCP_API_KEY="${MCP_API_KEY}"
 ```
+
+For private GitHub HTTPS clones, set a PAT on the deployment, for example:
+
+```bash
+export GITHUB_TOKEN="ghp_..."   # fine-grained or classic PAT with repo scope
+helm upgrade --install mcp-server ./chart \
+  -n my-namespace \
+  --set image.repository=quay.io/myorg/mcp-ocp-server \
+  --set image.tag=latest \
+  --set env.MCP_API_KEY="${MCP_API_KEY}" \
+  --set env.GITHUB_TOKEN="${GITHUB_TOKEN}"
+```
+
+Or add `env.GITHUB_TOKEN` in a values file (prefer a Secret reference in production).
 
 The chart creates:
 
@@ -116,7 +147,7 @@ The MCP endpoint is `https://<route-host>/mcp`.
 By default the workspace uses an `emptyDir` (lost on pod restart). For a persistent workspace across restarts:
 
 ```bash
-helm upgrade mcp-server ./charts/mcp-server \
+helm upgrade mcp-server ./chart \
   -n my-namespace \
   --set workspace.storageType=pvc \
   --set workspace.pvc.size=10Gi
@@ -139,7 +170,7 @@ rbac:
 ```
 
 ```bash
-helm upgrade mcp-server ./charts/mcp-server -n my-namespace -f my-values.yaml
+helm upgrade mcp-server ./chart -n my-namespace -f my-values.yaml
 ```
 
 ## Connecting Cursor
@@ -152,7 +183,7 @@ Add the following to your Cursor MCP settings (`~/.cursor/mcp.json` or workspace
     "ocp-ci-cd": {
       "url": "https://<route-host>/mcp",
       "headers": {
-        "Authorization": "Bearer <your-token>"
+        "X-API-Key": "<your-token>"
       }
     }
   }
@@ -174,16 +205,16 @@ For local development (no TLS, no auth):
 ## Security notes
 
 - The Route uses **edge TLS termination** — TLS is terminated at the OpenShift router; traffic inside the cluster is plain HTTP. For stricter requirements, switch to `tls.termination: reencrypt` and configure a pod certificate.
-- `MCP_BEARER_TOKEN` is the application-layer auth. Supply it via a Kubernetes Secret (see above) rather than as a plain env var or values override.
+- `MCP_API_KEY` is the application-layer auth, checked via the `X-API-Key` header.
 - The pod's ServiceAccount has a **namespaced `Role`** only — no `ClusterRole`. All `oc` and `helm` operations target the pod's own namespace.
-- When `MCP_BEARER_TOKEN` is not set, the server logs a warning and the endpoint is unauthenticated. This is acceptable only when the server is not reachable externally (e.g. local dev on `127.0.0.1`).
+- When `MCP_API_KEY` is not set, the server logs a warning and the endpoint is unauthenticated. This is acceptable only when the server is not reachable externally.
 - In-cluster kubeconfig is written from the projected service-account token (`tokenFile` pointer, not embedded), so it stays valid after token rotation.
 
 ## Typical end-to-end flow
 
 ```
 git_clone         Clone the application repo into WORKSPACE_ROOT
-oc_new_build      Create a BuildConfig for the app image
+oc_new_build      Create a BuildConfig (set context_path to the clone directory, e.g. myrepo, unless the Dockerfile is at WORKSPACE_ROOT)
 oc_start_build    Trigger the build → returns build_name
 wait_for_build    Block until build_name reaches Complete (or fail fast)
 helm_install      Deploy the Helm chart at the repo root into the pod namespace

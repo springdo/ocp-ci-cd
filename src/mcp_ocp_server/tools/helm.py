@@ -1,15 +1,12 @@
 """helm_install tool implementation."""
 
 import logging
-import os
 import time
 
 from ..runner import confined_path, run
+from ..target_ns import ensure_namespace_exists, target_namespace
 
 logger = logging.getLogger(__name__)
-
-# Fixed to the pod's namespace via Downward API; see Helm chart deployment.yaml.
-NAMESPACE = os.environ.get("POD_NAMESPACE", "default")
 
 
 async def helm_install(
@@ -17,13 +14,14 @@ async def helm_install(
     chart_path: str = ".",
     values_files: list[str] | None = None,
 ) -> str:
-    """Install or upgrade a Helm chart in the pod namespace.
+    """Install or upgrade a Helm chart in the target namespace.
 
     Uses `helm upgrade --install` (idempotent) so the tool is safe to call
     on both first installs and subsequent updates.
 
-    The namespace is always the pod's own namespace (injected via the Downward
-    API as POD_NAMESPACE) — cross-namespace installs are out of scope for v1.
+    Namespace resolution matches ``oc`` tools (see ``target_namespace`` in
+    ``target_ns``): ``OCP_TARGET_NAMESPACE``, then ``POD_NAMESPACE``, then
+    ``prototypes``. Cross-namespace installs beyond that are out of scope for v1.
 
     Args:
         release_name: Helm release name.
@@ -40,10 +38,13 @@ async def helm_install(
         RuntimeError: If helm exits non-zero after exhausting retries.
         ValueError:   If any path escapes WORKSPACE_ROOT.
     """
+    ns = target_namespace()
     logger.info(
         "helm_install called  release=%r  chart_path=%r  values_files=%r  namespace=%s",
-        release_name, chart_path, values_files, NAMESPACE,
+        release_name, chart_path, values_files, ns,
     )
+
+    await ensure_namespace_exists(ns)
 
     chart_dir = confined_path(chart_path)
     logger.debug("Resolved chart dir: %s  (exists=%s)", chart_dir, chart_dir.exists())
@@ -51,7 +52,7 @@ async def helm_install(
     argv = [
         "helm", "upgrade", "--install",
         release_name, str(chart_dir),
-        "-n", NAMESPACE,
+        "-n", ns,
         "--wait",
     ]
     if values_files:
@@ -74,5 +75,5 @@ async def helm_install(
             f"helm upgrade --install failed (exit {result.exit_code}):\n{result.stderr}"
         )
 
-    logger.info("helm_install OK  release=%r  namespace=%s  elapsed=%.1fs", release_name, NAMESPACE, elapsed)
+    logger.info("helm_install OK  release=%r  namespace=%s  elapsed=%.1fs", release_name, ns, elapsed)
     return result.stdout

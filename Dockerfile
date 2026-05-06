@@ -61,9 +61,20 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 # Workspace directory — group-writable so OpenShift's arbitrary-UID assignment works.
-RUN mkdir -p /workspace && chown 1001:0 /workspace && chmod g+rwX /workspace
+# HOME for git global config (UID 1001).
+RUN mkdir -p /workspace /opt/app-root/src && \
+    chown 1001:0 /workspace /opt/app-root/src && \
+    chmod g+rwX /workspace /opt/app-root/src
 
 USER 1001
+
+# S2I-style home for UID 1001; ensures `git config --global` has a writable path.
+ENV HOME=/opt/app-root/src
+
+RUN git config --global user.name "OCP_BOT" && \
+    git config --global user.email "OCP_BOT@orange-bank.ie" && \
+    git config --global --add safe.directory "/workspace" && \
+    git config --global --add safe.directory "/tmp"
 
 ENV WORKSPACE_ROOT=/workspace \
     PORT=8000 \
