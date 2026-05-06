@@ -9,6 +9,10 @@ image:
 
 replicaCount: 1
 
+# Pod annotation: change this (or rely on the default) to force a rolling restart.
+# Default is the Helm release revision so each `helm upgrade` rolls pods.
+rollme: ""
+
 service:
   port: 8000
 

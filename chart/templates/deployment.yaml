@@ -14,6 +14,8 @@ spec:
     metadata:
       labels:
         {{- include "mcp-server.selectorLabels" . | nindent 8 }}
+      annotations:
+        rollme: {{ .Values.rollme | default .Release.Revision | quote }}
     spec:
       serviceAccountName: {{ include "mcp-server.serviceAccountName" . }}
       # OpenShift restricted-v2 SCC: non-root, no privilege escalation.
