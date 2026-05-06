@@ -1,9 +1,11 @@
-"""OpenShift tool implementations: binary Docker build + wait_for_build."""
+"""OpenShift tool implementations: openshift_build + wait_for_build."""
 
 import asyncio
 import logging
+import os
 import re
 import time
+from urllib.parse import quote
 
 from ..runner import confined_path, run
 from ..target_ns import ensure_namespace_exists, target_namespace
@@ -29,7 +31,23 @@ def _parse_build_name_from_start_build(stdout: str) -> str | None:
     return None
 
 
-async def binary_docker_build(name: str, git_workspace: str) -> dict:
+def openshift_build_console_url(namespace: str, build_name: str | None) -> str | None:
+    """Deep link to a Build in the OpenShift console (OCP 4 dynamic console).
+
+    Set ``OPENSHIFT_CONSOLE_BASE_URL`` (no trailing slash), e.g.
+    ``https://console-openshift-console.apps.cluster.example.com``.
+    """
+    if not build_name:
+        return None
+    base = (os.environ.get("OPENSHIFT_CONSOLE_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        return None
+    ns_q = quote(namespace, safe="")
+    bn_q = quote(build_name, safe="")
+    return f"{base}/k8s/ns/{ns_q}/build.openshift.io~v1~Build/{bn_q}"
+
+
+async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
     """Create a binary Docker BuildConfig (if needed) and start a build from a local directory.
 
     Runs (fixed flags):
@@ -37,23 +55,26 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
     1. ``oc new-build --binary --name=<name> --strategy=docker -n <ns>``
     2. ``oc start-build <name> --from-dir=<git_workspace> -n <ns>``
 
-    ``git_workspace`` is resolved under ``WORKSPACE_ROOT`` (same layout as ``git_clone``).
+    ``git_workspace`` is resolved under ``WORKSPACE_ROOT``. If omitted, defaults to
+    ``name`` (same folder as ``git_clone`` when using URL-derived ``application_name``).
 
     If step 1 fails because the BuildConfig already exists, that is treated as success
     and step 2 still runs.
 
     Returns:
-        dict with ``build_name`` (for ``wait_for_build``), ``reused_buildconfig``,
-        ``new_build`` (stdout or reuse message), ``start_build_output``.
+        dict with ``build_name`` (same as ``build``, for ``wait_for_build``), ``namespace``,
+        ``console_url`` (if ``OPENSHIFT_CONSOLE_BASE_URL`` is set), ``reused_buildconfig``,
+        ``new_build``, ``start_build_output``.
 
     Raises:
         RuntimeError: If either step fails (except handled already-exists on new-build).
         ValueError: If ``git_workspace`` escapes ``WORKSPACE_ROOT``.
     """
+    ws = (git_workspace or "").strip() or name
     ns = target_namespace()
     logger.info(
-        "binary_docker_build  name=%r  git_workspace=%r  namespace=%s",
-        name, git_workspace, ns,
+        "openshift_build  name=%r  git_workspace=%r  namespace=%s",
+        name, ws, ns,
     )
 
     await ensure_namespace_exists(ns)
@@ -79,10 +100,10 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
                 nb_msg = (
                     f'BuildConfig "{name}" already exists in namespace "{ns}" — reusing it.'
                 )
-                logger.info("binary_docker_build new-build: %s", nb_msg)
+                logger.info("openshift_build new-build: %s", nb_msg)
             else:
                 logger.error(
-                    "binary_docker_build new-build FAILED (already exists?) but get bc failed  name=%r\nstderr: %s",
+                    "openshift_build new-build FAILED (already exists?) but get bc failed  name=%r\nstderr: %s",
                     name,
                     result_nb.stderr,
                 )
@@ -91,7 +112,7 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
                 )
         else:
             logger.error(
-                "binary_docker_build new-build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
+                "openshift_build new-build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
                 name,
                 result_nb.exit_code,
                 result_nb.stdout,
@@ -103,14 +124,14 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
     else:
         nb_msg = result_nb.stdout.strip()
 
-    from_dir = str(confined_path(git_workspace))
+    from_dir = str(confined_path(ws))
     argv_start = ["oc", "start-build", name, "--from-dir", from_dir, "-n", ns]
     logger.debug("oc start-build argv: %s", argv_start)
     result_sb = await run(argv_start)
 
     if result_sb.exit_code != 0:
         logger.error(
-            "binary_docker_build start-build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
+            "openshift_build start-build FAILED  name=%r  exit=%d\nstdout: %s\nstderr: %s",
             name,
             result_sb.exit_code,
             result_sb.stdout,
@@ -123,19 +144,23 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
     build_name = _parse_build_name_from_start_build(result_sb.stdout)
     if build_name:
         logger.info(
-            "binary_docker_build OK  name=%r  build_name=%r  reused_bc=%s",
+            "openshift_build OK  name=%r  build_name=%r  reused_bc=%s",
             name,
             build_name,
             reused_bc,
         )
     else:
         logger.warning(
-            "binary_docker_build: could not parse build name from: %r",
+            "openshift_build: could not parse build name from: %r",
             result_sb.stdout,
         )
 
+    console_url = openshift_build_console_url(ns, build_name)
     return {
         "build_name": build_name,
+        "build": build_name,
+        "namespace": ns,
+        "console_url": console_url,
         "reused_buildconfig": reused_bc,
         "new_build": nb_msg,
         "start_build_output": result_sb.stdout,
@@ -154,7 +179,7 @@ async def wait_for_build(
 
     Args:
         build_name:            Full build name (e.g. ``my-app-3``), typically
-                               from ``binary_docker_build`` output ``build_name``.
+                               from ``openshift_build`` output ``build_name``.
         timeout_seconds:       Maximum seconds to wait before giving up
                                (default 3600; max enforced at 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).

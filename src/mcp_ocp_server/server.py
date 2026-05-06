@@ -6,12 +6,15 @@ Start with:
 Environment variables:
     BIND_HOST           Bind address (default: 0.0.0.0)
     PORT                HTTP port (default: 8000)
-    WORKSPACE_ROOT      Base directory for git clones / Helm chart paths
+    WORKSPACE_ROOT      Base directory for git clones / Helm chart paths (default /workspace)
     POD_NAMESPACE       Used as target namespace for oc/helm when OCP_TARGET_NAMESPACE is unset (Downward API in-cluster)
     OCP_TARGET_NAMESPACE  Optional override for oc/helm namespace (otherwise POD_NAMESPACE, else active oc context)
     KUBECONFIG          Optional; auto-generated from SA token when running in-cluster
     MCP_API_KEY         When set, all requests must carry "X-API-Key: <value>"
     GITHUB_TOKEN        Optional; GitHub PAT for private HTTPS clones when git_clone omits github_token
+    OPENSHIFT_CONSOLE_BASE_URL  Optional; e.g. https://console-openshift-console.apps... (no trailing slash) for openshift_build console_url
+    OPENSHIFT_INTERNAL_REGISTRY  Optional; default image-registry.openshift-image-registry.svc:5000 (helm_deploy image.repository prefix)
+    HELM_DEPLOY_IMAGE_TAG  Optional; image tag for helm_deploy (default latest)
     LOG_LEVEL           Python logging level (default: INFO; set DEBUG for full traces)
 """
 
@@ -29,8 +32,8 @@ from .kubeconfig import bootstrap_kubeconfig
 from .runner import WORKSPACE_ROOT
 from .target_ns import target_namespace
 from .tools.git import git_clone as _git_clone
-from .tools.helm import helm_install as _helm_install
-from .tools.openshift import binary_docker_build as _binary_docker_build
+from .tools.helm import helm_deploy as _helm_deploy
+from .tools.openshift import openshift_build as _openshift_build
 from .tools.openshift import wait_for_build as _wait_for_build
 
 logger = logging.getLogger(__name__)
@@ -49,8 +52,8 @@ mcp = FastMCP(
     host=_BIND_HOST,
     instructions=(
         "MCP server for OpenShift builds and Helm deployments. "
-        "Typical flow: git_clone → binary_docker_build → wait_for_build → "
-        "helm_install."
+        "Typical flow: git_clone → openshift_build → wait_for_build → "
+        "helm_deploy."
     ),
     stateless_http=True,
 )
@@ -63,16 +66,19 @@ mcp = FastMCP(
 @mcp.tool()
 async def git_clone(
     repo_url: str,
-    local_path: str,
+    local_path: str | None = None,
     branch: str | None = None,
     github_token: str | None = None,
 ) -> str:
-    """Clone a git repository into WORKSPACE_ROOT/<local_path>.
+    """Clone a git repository into WORKSPACE_ROOT/<application_name>.
+
+    Default ``WORKSPACE_ROOT`` is ``/workspace`` (set in the container; override locally if needed).
 
     Args:
         repo_url:      The remote URL to clone from (https or ssh).
-        local_path:    Destination directory name, relative to WORKSPACE_ROOT.
-                       Must not contain '..' or resolve outside WORKSPACE_ROOT.
+        local_path:    Optional subdirectory name; if omitted, derived from the repo URL
+                       (last path segment). Use the same value as ``openshift_build`` ``name``
+                       and ``helm_deploy`` ``app_name``.
         branch:        Optional branch, tag, or commit ref to check out.
         github_token:  Optional GitHub PAT for private HTTPS repos. When omitted,
                        ``GITHUB_TOKEN`` from the environment is used if set.
@@ -100,8 +106,8 @@ async def git_clone(
 
 
 @mcp.tool()
-async def binary_docker_build(name: str, git_workspace: str) -> dict:
-    """Binary Docker build: ensure BuildConfig, then upload source and start a build.
+async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
+    """OpenShift binary Docker build: ensure BuildConfig, upload source, start build.
 
     Runs ``oc new-build --binary --name=<name> --strategy=docker`` then
     ``oc start-build <name> --from-dir=<git_workspace>`` (paths under
@@ -109,22 +115,24 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
     and the start-build still runs.
 
     Returns a dict with:
-    - ``build_name``: pass to ``wait_for_build``.
+    - ``build`` / ``build_name``: OpenShift Build resource name; pass ``build_name`` to ``wait_for_build``.
+    - ``namespace``: project/namespace the build runs in.
+    - ``console_url``: link to the build in the web console if ``OPENSHIFT_CONSOLE_BASE_URL`` is set, else null.
     - ``reused_buildconfig``: True if the BuildConfig already existed.
     - ``new_build``: new-build stdout or reuse message.
     - ``start_build_output``: raw ``oc start-build`` stdout.
 
     Args:
-        name:           BuildConfig name (same for both oc commands).
-        git_workspace:  Directory under ``WORKSPACE_ROOT`` containing the Dockerfile
-                        (e.g. the same ``local_path`` used with ``git_clone``).
+        name:           BuildConfig name; use the same string as ``git_clone`` ``application_name``
+                        and ``helm_deploy`` ``app_name``.
+        git_workspace:  Directory under ``WORKSPACE_ROOT`` with the Dockerfile; defaults to ``name``.
     """
-    logger.info("TOOL binary_docker_build  name=%r  git_workspace=%r", name, git_workspace)
+    logger.info("TOOL openshift_build  name=%r  git_workspace=%r", name, git_workspace)
     start = time.monotonic()
     try:
-        result = await _binary_docker_build(name, git_workspace)
+        result = await _openshift_build(name, git_workspace)
         logger.info(
-            "TOOL binary_docker_build OK  name=%r  build_name=%r  elapsed=%.1fs",
+            "TOOL openshift_build OK  name=%r  build_name=%r  elapsed=%.1fs",
             name,
             result.get("build_name"),
             time.monotonic() - start,
@@ -132,7 +140,7 @@ async def binary_docker_build(name: str, git_workspace: str) -> dict:
         return result
     except Exception as exc:
         logger.error(
-            "TOOL binary_docker_build ERROR  name=%r  elapsed=%.1fs  error=%s",
+            "TOOL openshift_build ERROR  name=%r  elapsed=%.1fs  error=%s",
             name,
             time.monotonic() - start,
             exc,
@@ -155,7 +163,7 @@ async def wait_for_build(
     - ``elapsed_seconds`` (int): Wall-clock seconds spent waiting.
 
     Args:
-        build_name:            Full build name from ``binary_docker_build`` output,
+        build_name:            Full build name from ``openshift_build`` output,
                                e.g. 'my-app-3'.
         timeout_seconds:       Maximum seconds to wait (default 3600; max 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).
@@ -175,35 +183,43 @@ async def wait_for_build(
 
 
 @mcp.tool()
-async def helm_install(
-    release_name: str,
-    chart_path: str = ".",
-    values_files: list[str] | None = None,
-) -> str:
-    """Install or upgrade a Helm chart in the pod namespace (idempotent).
+async def helm_deploy(app_name: str) -> dict:
+    """Deploy the template app chart using the image built by ``openshift_build``.
 
-    Uses `helm upgrade --install --wait` so the call blocks until all
-    chart resources are ready or Helm reports a failure.
+    Runs ``helm upgrade -i <app_name> <chart> -n <ns>`` (no ``--wait``) with
+    ``fullnameOverride`` and ``image.repository`` / ``image.tag`` set (internal
+    registry ``OPENSHIFT_INTERNAL_REGISTRY`` / ``namespace`` / ``app_name``;
+    tag from ``HELM_DEPLOY_IMAGE_TAG``, default ``latest``).
 
-    The namespace is always the pod's own namespace — cross-namespace
-    installs are not supported in v1.
+    Chart path: first of ``<app_name>/chart``, ``<app_name>`` (``Chart.yaml`` at clone
+    root), or ``chart`` under ``WORKSPACE_ROOT``. Release name equals ``app_name``.
+
+    On success, runs ``oc get route`` to return ``route_host`` / ``route_url`` when
+    a matching Route exists (label ``app.kubernetes.io/instance=<app_name>`` or
+    Route named ``app_name``).
 
     Args:
-        release_name: Helm release name.
-        chart_path:   Path to the chart directory, relative to WORKSPACE_ROOT
-                      (default '.' — the root of a cloned repo when Chart.yaml
-                      lives at the top level).
-        values_files: Optional list of values file paths relative to
-                      WORKSPACE_ROOT, applied in order as -f arguments.
+        app_name: Same as ``openshift_build`` ``name`` and the clone directory (``git_clone``
+                  ``local_path`` or URL-derived ``application_name``).
     """
-    logger.info("TOOL helm_install  release=%r  chart_path=%r  values_files=%r", release_name, chart_path, values_files)
+    logger.info("TOOL helm_deploy  app_name=%r", app_name)
     start = time.monotonic()
     try:
-        result = await _helm_install(release_name, chart_path, values_files)
-        logger.info("TOOL helm_install OK  release=%r  elapsed=%.1fs", release_name, time.monotonic() - start)
+        result = await _helm_deploy(app_name)
+        logger.info(
+            "TOOL helm_deploy OK  app_name=%r  route_url=%r  elapsed=%.1fs",
+            app_name,
+            result.get("route_url"),
+            time.monotonic() - start,
+        )
         return result
     except Exception as exc:
-        logger.error("TOOL helm_install ERROR  release=%r  elapsed=%.1fs  error=%s", release_name, time.monotonic() - start, exc)
+        logger.error(
+            "TOOL helm_deploy ERROR  app_name=%r  elapsed=%.1fs  error=%s",
+            app_name,
+            time.monotonic() - start,
+            exc,
+        )
         raise
 
 

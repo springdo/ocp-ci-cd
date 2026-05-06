@@ -1,6 +1,6 @@
 # MCP OCP Server
 
-An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and run `git clone` → `binary_docker_build` → `wait_for_build` → `helm install` as natural-language-driven tool calls.
+An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and run `git clone` → `openshift_build` → `wait_for_build` → `helm_deploy` as natural-language-driven tool calls.
 
 ## Prerequisites
 
@@ -16,10 +16,10 @@ An MCP server that exposes OpenShift build and Helm deployment operations over t
 
 | Tool | What it does |
 |------|-------------|
-| `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<local_path>`; optional GitHub PAT for private **HTTPS** repos |
-| `binary_docker_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…` (two args: `name`, `git_workspace` under `WORKSPACE_ROOT`). Reuses existing BuildConfig if present. |
+| `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<application_name>`; `local_path` is optional (defaults to the repo name from the URL). Optional GitHub PAT for private **HTTPS** repos |
+| `openshift_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…`. `git_workspace` defaults to `name` (same folder as clone when names match). Returns `build` / `build_name`, `namespace`, optional `console_url` (set `OPENSHIFT_CONSOLE_BASE_URL`). Reuses existing BuildConfig if present. |
 | `wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
-| `helm_install` | `helm upgrade --install --wait` against a chart in `WORKSPACE_ROOT` |
+| `helm_deploy` | `helm upgrade -i <app_name> <chart>` (no `--wait`) with `fullnameOverride` and internal-registry `image.repository`; chart at `<app_name>/chart` or `chart/`; returns `route_url` when `oc get route` finds the app |
 
 ## Running locally (development)
 
@@ -36,10 +36,11 @@ Log in to OpenShift first, then start the server:
 ```bash
 oc login --token=<token> --server=https://api.mycluster.example.com:6443
 
-WORKSPACE_ROOT=/tmp/mcp-workspace \
 MCP_API_KEY=my-secret-token \
 mcp-ocp-server
 ```
+
+Default `WORKSPACE_ROOT` is `/workspace`; override if needed (for example `WORKSPACE_ROOT=/tmp/mcp-workspace`).
 
 The server binds to `0.0.0.0:8000` by default. For local access, use:
 
@@ -53,12 +54,15 @@ http://127.0.0.1:8000/mcp
 |----------|---------|-------------|
 | `BIND_HOST` | `0.0.0.0` | Bind address (`127.0.0.1` is useful for localhost-only local dev) |
 | `PORT` | `8000` | HTTP port |
-| `WORKSPACE_ROOT` | `/tmp/workspace` | Base directory for clones and Helm charts |
+| `WORKSPACE_ROOT` | `/workspace` | Base directory for clones and Helm charts |
 | `OCP_TARGET_NAMESPACE` | *(unset)* | If set, `oc` / `helm` use this namespace. Otherwise see `POD_NAMESPACE`. |
 | `POD_NAMESPACE` | *(unset locally)* | In-cluster, injected by the Downward API — **the MCP pod's namespace**. With no `OCP_TARGET_NAMESPACE`, tools use this in-cluster; locally they use your **current `oc` context** namespace (then `default`). |
 | `KUBECONFIG` | *(auto in-cluster)* | Path to kubeconfig; auto-generated from SA token when running in a pod |
 | `MCP_API_KEY` | *(unset = no auth)* | When set, all requests must carry `X-API-Key: <value>` |
 | `GITHUB_TOKEN` | *(unset)* | GitHub personal access token for private **HTTPS** clones when the `git_clone` tool does not pass `github_token` |
+| `OPENSHIFT_CONSOLE_BASE_URL` | *(unset)* | Web console origin with no trailing slash (e.g. `https://console-openshift-console.apps.<cluster>`). Enables `console_url` on `openshift_build`. Discover with `oc get route console -n openshift-console -o jsonpath='{.spec.host}'` and prefix `https://`. |
+| `OPENSHIFT_INTERNAL_REGISTRY` | `image-registry.openshift-image-registry.svc:5000` | Registry host for `helm_deploy` `image.repository` (`<registry>/<namespace>/<app_name>`). |
+| `HELM_DEPLOY_IMAGE_TAG` | `latest` | Image tag passed to `helm_deploy` (`--set image.tag`). |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 
 ### Private GitHub repositories
@@ -72,12 +76,19 @@ SSH URLs are not altered; use SSH keys or an agent if you clone via `git@github.
 
 The container image sets default `git config` `user.name` / `user.email` to **OCP_BOT** / **OCP_BOT@orange-bank.ie** so git does not fail identity checks after clone.
 
-### OpenShift target namespace and `binary_docker_build`
+### OpenShift target namespace and `openshift_build`
 
 - **`oc` / `helm` tools** resolve the namespace as: `OCP_TARGET_NAMESPACE` → **`POD_NAMESPACE`** (the MCP pod's namespace when running in-cluster) → **active `oc` context** namespace when developing locally → `default` if that cannot be read.
-- Before `binary_docker_build`, `wait_for_build`, and `helm_install`, the server may **ensure the target namespace exists**. If the target is **the same as the MCP pod’s namespace** (`POD_NAMESPACE`), this step is skipped — no cluster-scoped `Namespace` GET is required. For **other** targets (`OCP_TARGET_NAMESPACE`), your identity needs permission to read or create namespaces/projects.
-- If **`oc new-build` fails because the BuildConfig already exists**, **`binary_docker_build`** still succeeds and runs **`oc start-build`** (after verifying the BuildConfig with `oc get buildconfig`).
+- Before `openshift_build`, `wait_for_build`, and `helm_deploy`, the server may **ensure the target namespace exists**. If the target is **the same as the MCP pod’s namespace** (`POD_NAMESPACE`), this step is skipped — no cluster-scoped `Namespace` GET is required. For **other** targets (`OCP_TARGET_NAMESPACE`), your identity needs permission to read or create namespaces/projects.
+- If **`oc new-build` fails because the BuildConfig already exists**, **`openshift_build`** still succeeds and runs **`oc start-build`** (after verifying the BuildConfig with `oc get buildconfig`).
 - Binary uploads (`oc start-build --from-dir`) need **`create`** on **`buildconfigs/instantiatebinary`** — the Helm chart `Role` includes this; re-apply the chart if you hit Forbidden on upload.
+
+### `helm_deploy` (template app)
+
+- **Single argument `app_name`:** use the same string as `openshift_build` `name` and as the clone directory (`git_clone` `local_path`, or the URL-derived name when `local_path` is omitted) so the image `image-registry.openshift-image-registry.svc:5000/<namespace>/<app_name>` matches the build output.
+- **Chart:** first path under `WORKSPACE_ROOT` that contains `Chart.yaml`: `<app_name>/chart`, then `<app_name>` (chart at clone root — common for template repos), then `chart`.
+- **Helm:** `helm upgrade -i <app_name> … --set-string fullnameOverride=<app_name> --set image.repository=… --set image.tag=…` (no `--wait`; idempotent).
+- **Route URL:** after success, `oc get route` looks for `app.kubernetes.io/instance=<app_name>` or a Route named `app_name`. Template charts should follow one of those conventions.
 
 ## Building the container image
 
@@ -213,8 +224,8 @@ For local development (no TLS, no auth):
 ## Typical end-to-end flow
 
 ```
-git_clone              Clone the application repo into WORKSPACE_ROOT/<local_path>
-binary_docker_build    name + git_workspace (clone dir); fixed binary/docker new-build then start-build --from-dir
+git_clone              Clone into WORKSPACE_ROOT/<application_name> (optional local_path; else URL-derived)
+openshift_build        name (+ optional git_workspace, default name); returns build name, namespace, optional console URL
 wait_for_build         Block until build_name reaches Complete (or fail fast)
-helm_install           Deploy the Helm chart at the repo root into the target namespace
+helm_deploy            helm upgrade -i (no --wait), fullnameOverride + image; route_url when found
 ```

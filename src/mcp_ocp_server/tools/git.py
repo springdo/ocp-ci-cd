@@ -3,11 +3,29 @@
 import logging
 import os
 import time
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 from ..runner import WORKSPACE_ROOT, confined_path, run
 
 logger = logging.getLogger(__name__)
+
+
+def application_name_from_repo_url(repo_url: str) -> str:
+    """Last path segment of the repo (e.g. ``my-app`` from ``https://github.com/org/my-app.git``)."""
+    u = repo_url.strip().rstrip("/")
+    if u.endswith(".git"):
+        u = u[:-4]
+    if "://" in u:
+        path = urlparse(u).path.strip("/")
+        name = path.split("/")[-1] if path else "app"
+    elif u.startswith("git@"):
+        path = u.split(":", 1)[-1].strip("/")
+        name = path.split("/")[-1] if path else "app"
+    else:
+        name = os.path.basename(u) or "app"
+    if not name or name in (".", ".."):
+        name = "app"
+    return name
 
 
 def _host_port_from_netloc(netloc: str) -> str:
@@ -31,7 +49,7 @@ def _clone_url_with_https_pat(repo_url: str, token: str) -> str:
 
 async def git_clone(
     repo_url: str,
-    local_path: str,
+    local_path: str | None = None,
     branch: str | None = None,
     github_token: str | None = None,
 ) -> str:
@@ -39,18 +57,22 @@ async def git_clone(
 
     Args:
         repo_url:       The remote URL to clone from.
-        local_path:     Destination directory relative to WORKSPACE_ROOT.
+        local_path:     Destination directory under WORKSPACE_ROOT. If omitted, the
+                        repository name is taken from the URL (use the same string as
+                        ``name`` / ``app_name`` in later tools).
         branch:         Optional branch, tag, or commit ref to check out.
         github_token:   Optional GitHub PAT for private HTTPS repos. If omitted,
                         ``GITHUB_TOKEN`` from the environment is used when set.
 
     Returns:
-        A short summary string on success.
+        A short summary string on success (includes ``application_name``).
 
     Raises:
         RuntimeError: If `git clone` exits non-zero.
         ValueError:   If local_path would escape WORKSPACE_ROOT.
     """
+    effective_path = (local_path or "").strip() or application_name_from_repo_url(repo_url)
+
     token = (github_token or os.environ.get("GITHUB_TOKEN") or "").strip() or None
     scheme = urlsplit(repo_url).scheme.lower()
     if token and scheme == "https":
@@ -64,14 +86,15 @@ async def git_clone(
             auth_kind = "none"
 
     logger.info(
-        "git_clone called  repo=%s  local_path=%r  branch=%r  auth=%s",
+        "git_clone called  repo=%s  local_path=%r  application_name=%r  branch=%r  auth=%s",
         repo_url,
         local_path,
+        effective_path,
         branch,
         auth_kind,
     )
 
-    dest = confined_path(local_path)
+    dest = confined_path(effective_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.debug("Clone destination: %s  (exists=%s)", dest, dest.exists())
 
@@ -109,4 +132,8 @@ async def git_clone(
             )
 
     logger.info("git_clone OK  dest=%s  elapsed=%.1fs", dest, elapsed)
-    return f"Cloned {repo_url} → {dest}\n{result.stdout}".strip()
+    return (
+        f"Cloned {repo_url} → {dest}\n"
+        f"application_name={effective_path}  (use for openshift_build name, helm_deploy app_name)\n"
+        f"{result.stdout}"
+    ).strip()

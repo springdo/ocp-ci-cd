@@ -7,7 +7,7 @@ metadata:
     {{- include "mcp-server.labels" . | nindent 4 }}
 rules:
   # -----------------------------------------------------------------------
-  # OpenShift Build API — required by binary_docker_build, wait_for_build.
+  # OpenShift Build API — required by openshift_build, wait_for_build.
   # instantiatebinary: oc start-build --from-dir (binary upload to the build).
   # -----------------------------------------------------------------------
   - apiGroups: ["build.openshift.io"]
@@ -52,7 +52,7 @@ rules:
     verbs: ["get", "list", "create", "update", "patch", "delete"]
 
   # -----------------------------------------------------------------------
-  # OpenShift Route — helm_install may create Routes.
+  # OpenShift Route — helm_deploy / app charts may create Routes; oc get route for URL.
   # -----------------------------------------------------------------------
   - apiGroups: ["route.openshift.io"]
     resources: ["routes", "routes/custom-host"]
@@ -60,7 +60,7 @@ rules:
 
   # -----------------------------------------------------------------------
   # RBAC — Helm charts that create Roles/RoleBindings need these.
-  # (helm install with --wait reads events)
+  # (Helm may list/watch events during install/upgrade)
   # -----------------------------------------------------------------------
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]

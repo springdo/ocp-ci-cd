@@ -56,6 +56,8 @@ env:
   # GITHUB_TOKEN: ""
   # Optional: force oc/helm to use this namespace (default in app: POD_NAMESPACE = pod's namespace).
   # OCP_TARGET_NAMESPACE: "other-ns"
+  # Optional: OpenShift console origin (no trailing slash) for openshift_build console_url in tool output.
+  # OPENSHIFT_CONSOLE_BASE_URL: "https://console-openshift-console.apps.example.com"
 
 resources:
   requests:

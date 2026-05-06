@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
-WORKSPACE_ROOT = pathlib.Path(os.environ.get("WORKSPACE_ROOT", "/tmp/workspace"))
+WORKSPACE_ROOT = pathlib.Path(os.environ.get("WORKSPACE_ROOT", "/workspace"))
 
 MAX_OUTPUT_BYTES = 50_000  # ~50 KB per stream
 
