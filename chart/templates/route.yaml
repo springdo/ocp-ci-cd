@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "mcp-server.labels" . | nindent 4 }}
   annotations:
-    # Increase the router timeout to accommodate long wait_for_build calls
+    # Increase the router timeout to accommodate long deploy_from_git / debug_wait_for_build calls
     # (builds can take many minutes; default HAProxy timeout is 30s).
     haproxy.router.openshift.io/timeout: {{ .Values.route.timeoutAnnotation | default "3600s" | quote }}
 spec:

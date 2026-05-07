@@ -27,7 +27,7 @@ route:
     termination: edge
     # Redirect plain HTTP to HTTPS.
     insecureEdgeTerminationPolicy: Redirect
-  # Increase the route timeout for long-running wait_for_build calls.
+  # Increase the route timeout for long-running deploy_from_git / debug_wait_for_build calls.
   # Value must be a duration string understood by HAProxy, e.g. "3600s".
   timeoutAnnotation: "3600s"
 
@@ -52,11 +52,11 @@ env:
   # API key for MCP endpoint authentication (sent via X-API-Key header).
   # Test-only default; replace for non-test deployments.
   MCP_API_KEY: "daffy-duck"
-  # Optional: GitHub PAT for private HTTPS git_clone (see README). Prefer a Secret in production.
+  # Optional: GitHub PAT for private HTTPS debug_git_clone / deploy_from_git (see README).
   # GITHUB_TOKEN: ""
   # Optional: force oc/helm to use this namespace (default in app: POD_NAMESPACE = pod's namespace).
   # OCP_TARGET_NAMESPACE: "other-ns"
-  # Optional: OpenShift console origin (no trailing slash) for openshift_build console_url in tool output.
+  # Optional: OpenShift console origin (no trailing slash) for debug_openshift_build console_url in tool output.
   # OPENSHIFT_CONSOLE_BASE_URL: "https://console-openshift-console.apps.example.com"
 
 resources:

@@ -11,10 +11,10 @@ Environment variables:
     OCP_TARGET_NAMESPACE  Optional override for oc/helm namespace (otherwise POD_NAMESPACE, else active oc context)
     KUBECONFIG          Optional; auto-generated from SA token when running in-cluster
     MCP_API_KEY         When set, all requests must carry "X-API-Key: <value>"
-    GITHUB_TOKEN        Optional; GitHub PAT for private HTTPS clones when git_clone omits github_token
-    OPENSHIFT_CONSOLE_BASE_URL  Optional; e.g. https://console-openshift-console.apps... (no trailing slash) for openshift_build console_url
-    OPENSHIFT_INTERNAL_REGISTRY  Optional; default image-registry.openshift-image-registry.svc:5000 (helm_deploy image.repository prefix)
-    HELM_DEPLOY_IMAGE_TAG  Optional; image tag for helm_deploy (default latest)
+    GITHUB_TOKEN        Optional; GitHub PAT for private HTTPS clones when debug_git_clone / deploy_from_git omits github_token
+    OPENSHIFT_CONSOLE_BASE_URL  Optional; e.g. https://console-openshift-console.apps... (no trailing slash) for debug_openshift_build console_url
+    OPENSHIFT_INTERNAL_REGISTRY  Optional; default image-registry.openshift-image-registry.svc:5000 (debug_helm_deploy image.repository prefix)
+    HELM_DEPLOY_IMAGE_TAG  Optional; image tag for debug_helm_deploy / deploy_from_git (default latest)
     LOG_LEVEL           Python logging level (default: INFO; set DEBUG for full traces)
 """
 
@@ -31,6 +31,7 @@ from starlette.responses import JSONResponse
 from .kubeconfig import bootstrap_kubeconfig
 from .runner import WORKSPACE_ROOT
 from .target_ns import target_namespace
+from .tools.git import application_name_from_repo_url
 from .tools.git import git_clone as _git_clone
 from .tools.helm import helm_deploy as _helm_deploy
 from .tools.openshift import openshift_build as _openshift_build
@@ -52,8 +53,9 @@ mcp = FastMCP(
     host=_BIND_HOST,
     instructions=(
         "MCP server for OpenShift builds and Helm deployments. "
-        "Typical flow: git_clone → openshift_build → wait_for_build → "
-        "helm_deploy."
+        "Prefer deploy_from_git(repo_url, …) for clone → build → wait → helm in one call. "
+        "Low-level steps are available as debug_git_clone, debug_openshift_build, "
+        "debug_wait_for_build, debug_helm_deploy."
     ),
     stateless_http=True,
 )
@@ -64,21 +66,21 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def git_clone(
+async def debug_git_clone(
     repo_url: str,
     local_path: str | None = None,
     branch: str | None = None,
     github_token: str | None = None,
 ) -> str:
-    """Clone a git repository into WORKSPACE_ROOT/<application_name>.
+    """Clone a git repository into WORKSPACE_ROOT/<application_name> (low-level).
 
     Default ``WORKSPACE_ROOT`` is ``/workspace`` (set in the container; override locally if needed).
 
     Args:
         repo_url:      The remote URL to clone from (https or ssh).
         local_path:    Optional subdirectory name; if omitted, derived from the repo URL
-                       (last path segment). Use the same value as ``openshift_build`` ``name``
-                       and ``helm_deploy`` ``app_name``.
+                       (last path segment). Use the same value as ``debug_openshift_build`` ``name``
+                       and ``debug_helm_deploy`` ``app_name``.
         branch:        Optional branch, tag, or commit ref to check out.
         github_token:  Optional GitHub PAT for private HTTPS repos. When omitted,
                        ``GITHUB_TOKEN`` from the environment is used if set.
@@ -89,7 +91,7 @@ async def git_clone(
         or (os.environ.get("GITHUB_TOKEN") or "").strip()
     )
     logger.info(
-        "TOOL git_clone  repo=%s  local_path=%r  branch=%r  github_token=%s",
+        "TOOL debug_git_clone  repo=%s  local_path=%r  branch=%r  github_token=%s",
         repo_url,
         local_path,
         branch,
@@ -98,16 +100,16 @@ async def git_clone(
     start = time.monotonic()
     try:
         result = await _git_clone(repo_url, local_path, branch, github_token)
-        logger.info("TOOL git_clone OK  elapsed=%.1fs", time.monotonic() - start)
+        logger.info("TOOL debug_git_clone OK  elapsed=%.1fs", time.monotonic() - start)
         return result
     except Exception as exc:
-        logger.error("TOOL git_clone ERROR  elapsed=%.1fs  error=%s", time.monotonic() - start, exc)
+        logger.error("TOOL debug_git_clone ERROR  elapsed=%.1fs  error=%s", time.monotonic() - start, exc)
         raise
 
 
 @mcp.tool()
-async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
-    """OpenShift binary Docker build: ensure BuildConfig, upload source, start build.
+async def debug_openshift_build(name: str, git_workspace: str | None = None) -> dict:
+    """OpenShift binary Docker build: ensure BuildConfig, upload source, start build (low-level).
 
     Runs ``oc new-build --binary --name=<name> --strategy=docker`` then
     ``oc start-build <name> --from-dir=<git_workspace>`` (paths under
@@ -115,7 +117,7 @@ async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
     and the start-build still runs.
 
     Returns a dict with:
-    - ``build`` / ``build_name``: OpenShift Build resource name; pass ``build_name`` to ``wait_for_build``.
+    - ``build`` / ``build_name``: OpenShift Build resource name; pass ``build_name`` to ``debug_wait_for_build``.
     - ``namespace``: project/namespace the build runs in.
     - ``console_url``: link to the build in the web console if ``OPENSHIFT_CONSOLE_BASE_URL`` is set, else null.
     - ``reused_buildconfig``: True if the BuildConfig already existed.
@@ -123,16 +125,16 @@ async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
     - ``start_build_output``: raw ``oc start-build`` stdout.
 
     Args:
-        name:           BuildConfig name; use the same string as ``git_clone`` ``application_name``
-                        and ``helm_deploy`` ``app_name``.
+        name:           BuildConfig name; use the same string as ``debug_git_clone`` ``application_name``
+                        and ``debug_helm_deploy`` ``app_name``.
         git_workspace:  Directory under ``WORKSPACE_ROOT`` with the Dockerfile; defaults to ``name``.
     """
-    logger.info("TOOL openshift_build  name=%r  git_workspace=%r", name, git_workspace)
+    logger.info("TOOL debug_openshift_build  name=%r  git_workspace=%r", name, git_workspace)
     start = time.monotonic()
     try:
         result = await _openshift_build(name, git_workspace)
         logger.info(
-            "TOOL openshift_build OK  name=%r  build_name=%r  elapsed=%.1fs",
+            "TOOL debug_openshift_build OK  name=%r  build_name=%r  elapsed=%.1fs",
             name,
             result.get("build_name"),
             time.monotonic() - start,
@@ -140,7 +142,7 @@ async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
         return result
     except Exception as exc:
         logger.error(
-            "TOOL openshift_build ERROR  name=%r  elapsed=%.1fs  error=%s",
+            "TOOL debug_openshift_build ERROR  name=%r  elapsed=%.1fs  error=%s",
             name,
             time.monotonic() - start,
             exc,
@@ -149,12 +151,12 @@ async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
 
 
 @mcp.tool()
-async def wait_for_build(
+async def debug_wait_for_build(
     build_name: str,
     timeout_seconds: int = 3600,
     poll_interval_seconds: int = 10,
 ) -> dict:
-    """Poll an OpenShift Build until it reaches a terminal phase or times out.
+    """Poll an OpenShift Build until it reaches a terminal phase or times out (low-level).
 
     Returns a dict containing:
     - ``phase`` (str): 'Complete', 'Failed', 'Cancelled', 'Error', or 'Timeout'.
@@ -163,28 +165,41 @@ async def wait_for_build(
     - ``elapsed_seconds`` (int): Wall-clock seconds spent waiting.
 
     Args:
-        build_name:            Full build name from ``openshift_build`` output,
+        build_name:            Full build name from ``debug_openshift_build`` output,
                                e.g. 'my-app-3'.
         timeout_seconds:       Maximum seconds to wait (default 3600; max 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).
     """
-    logger.info("TOOL wait_for_build  build=%r  timeout=%ds  interval=%ds", build_name, timeout_seconds, poll_interval_seconds)
+    logger.info(
+        "TOOL debug_wait_for_build  build=%r  timeout=%ds  interval=%ds",
+        build_name,
+        timeout_seconds,
+        poll_interval_seconds,
+    )
     start = time.monotonic()
     try:
         result = await _wait_for_build(build_name, timeout_seconds, poll_interval_seconds)
         logger.info(
-            "TOOL wait_for_build DONE  build=%r  phase=%r  success=%s  elapsed=%.1fs",
-            build_name, result.get("phase"), result.get("success"), time.monotonic() - start,
+            "TOOL debug_wait_for_build DONE  build=%r  phase=%r  success=%s  elapsed=%.1fs",
+            build_name,
+            result.get("phase"),
+            result.get("success"),
+            time.monotonic() - start,
         )
         return result
     except Exception as exc:
-        logger.error("TOOL wait_for_build ERROR  build=%r  elapsed=%.1fs  error=%s", build_name, time.monotonic() - start, exc)
+        logger.error(
+            "TOOL debug_wait_for_build ERROR  build=%r  elapsed=%.1fs  error=%s",
+            build_name,
+            time.monotonic() - start,
+            exc,
+        )
         raise
 
 
 @mcp.tool()
-async def helm_deploy(app_name: str) -> dict:
-    """Deploy the template app chart using the image built by ``openshift_build``.
+async def debug_helm_deploy(app_name: str) -> dict:
+    """Deploy the template app chart using the image built by ``debug_openshift_build`` (low-level).
 
     Runs ``helm upgrade -i <app_name> <chart> -n <ns>`` (no ``--wait``) with
     ``fullnameOverride`` and ``image.repository`` / ``image.tag`` set (internal
@@ -199,15 +214,15 @@ async def helm_deploy(app_name: str) -> dict:
     Route named ``app_name``).
 
     Args:
-        app_name: Same as ``openshift_build`` ``name`` and the clone directory (``git_clone``
+        app_name: Same as ``debug_openshift_build`` ``name`` and the clone directory (``debug_git_clone``
                   ``local_path`` or URL-derived ``application_name``).
     """
-    logger.info("TOOL helm_deploy  app_name=%r", app_name)
+    logger.info("TOOL debug_helm_deploy  app_name=%r", app_name)
     start = time.monotonic()
     try:
         result = await _helm_deploy(app_name)
         logger.info(
-            "TOOL helm_deploy OK  app_name=%r  route_url=%r  elapsed=%.1fs",
+            "TOOL debug_helm_deploy OK  app_name=%r  route_url=%r  elapsed=%.1fs",
             app_name,
             result.get("route_url"),
             time.monotonic() - start,
@@ -215,8 +230,97 @@ async def helm_deploy(app_name: str) -> dict:
         return result
     except Exception as exc:
         logger.error(
-            "TOOL helm_deploy ERROR  app_name=%r  elapsed=%.1fs  error=%s",
+            "TOOL debug_helm_deploy ERROR  app_name=%r  elapsed=%.1fs  error=%s",
             app_name,
+            time.monotonic() - start,
+            exc,
+        )
+        raise
+
+
+@mcp.tool()
+async def deploy_from_git(
+    repo_url: str,
+    local_path: str | None = None,
+    branch: str | None = None,
+    github_token: str | None = None,
+    git_workspace: str | None = None,
+    build_wait_timeout_seconds: int = 3600,
+    build_poll_interval_seconds: int = 10,
+) -> dict:
+    """Clone a repo, binary-build, wait for completion, then Helm deploy (single call).
+
+    Resolves ``application_name`` as ``local_path`` or the repo URL basename (same rules
+    as ``debug_git_clone``), then runs ``debug_openshift_build`` → ``debug_wait_for_build``
+    → ``debug_helm_deploy`` with that name. Helm runs only if the build reaches phase
+    ``Complete``.
+
+    Args:
+        repo_url:                     Git remote URL (https or ssh).
+        local_path:                   Optional clone directory name under ``WORKSPACE_ROOT``;
+                                      if omitted, derived from the URL.
+        branch:                       Optional ref to check out after clone.
+        github_token:                 Optional GitHub PAT for private HTTPS clones.
+        git_workspace:                Source directory for ``oc start-build --from-dir``;
+                                      defaults to ``application_name``.
+        build_wait_timeout_seconds:   Passed to ``debug_wait_for_build`` (default 3600).
+        build_poll_interval_seconds:  Poll interval for ``debug_wait_for_build`` (default 10).
+
+    Returns:
+        Dict with ``application_name``, ``clone`` (stdout summary string), ``build``,
+        ``wait``, and ``helm`` (each tool's return shape).
+    """
+    application_name = (local_path or "").strip() or application_name_from_repo_url(repo_url)
+    logger.info(
+        "TOOL deploy_from_git  repo=%r  application_name=%r  branch=%r  git_workspace=%r",
+        repo_url,
+        application_name,
+        branch,
+        git_workspace,
+    )
+    start = time.monotonic()
+    try:
+        clone_text = await _git_clone(repo_url, local_path, branch, github_token)
+        build_out = await _openshift_build(application_name, git_workspace)
+        build_name = build_out.get("build_name") or build_out.get("build")
+        if not build_name:
+            raise RuntimeError(
+                "deploy_from_git: no build_name in debug_openshift_build output: "
+                f"{build_out!r}"
+            )
+
+        wait_out = await _wait_for_build(
+            build_name,
+            build_wait_timeout_seconds,
+            build_poll_interval_seconds,
+        )
+        if not wait_out.get("success"):
+            phase = wait_out.get("phase")
+            msg = wait_out.get("message") or ""
+            raise RuntimeError(
+                f"deploy_from_git: build did not succeed (phase={phase!r} message={msg!r}); "
+                f"wait result: {wait_out!r}"
+            )
+
+        helm_out = await _helm_deploy(application_name)
+
+        logger.info(
+            "TOOL deploy_from_git OK  application_name=%r  route_url=%r  elapsed=%.1fs",
+            application_name,
+            helm_out.get("route_url"),
+            time.monotonic() - start,
+        )
+        return {
+            "application_name": application_name,
+            "clone": clone_text,
+            "build": build_out,
+            "wait": wait_out,
+            "helm": helm_out,
+        }
+    except Exception as exc:
+        logger.error(
+            "TOOL deploy_from_git ERROR  application_name=%r  elapsed=%.1fs  error=%s",
+            application_name,
             time.monotonic() - start,
             exc,
         )

@@ -7,7 +7,7 @@ metadata:
     {{- include "mcp-server.labels" . | nindent 4 }}
 rules:
   # -----------------------------------------------------------------------
-  # OpenShift Build API — required by openshift_build, wait_for_build.
+  # OpenShift Build API — required by debug_openshift_build, debug_wait_for_build, deploy_from_git.
   # instantiatebinary: oc start-build --from-dir (binary upload to the build).
   # -----------------------------------------------------------------------
   - apiGroups: ["build.openshift.io"]
@@ -52,7 +52,7 @@ rules:
     verbs: ["get", "list", "create", "update", "patch", "delete"]
 
   # -----------------------------------------------------------------------
-  # OpenShift Route — helm_deploy / app charts may create Routes; oc get route for URL.
+  # OpenShift Route — debug_helm_deploy / deploy_from_git; app charts may create Routes.
   # -----------------------------------------------------------------------
   - apiGroups: ["route.openshift.io"]
     resources: ["routes", "routes/custom-host"]

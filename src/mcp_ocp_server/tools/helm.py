@@ -1,4 +1,4 @@
-"""helm_deploy — constrained Helm install for template repos after openshift_build."""
+"""helm_deploy — constrained Helm install (MCP tool: debug_helm_deploy, also used by deploy_from_git)."""
 
 import logging
 import os
@@ -77,8 +77,8 @@ async def helm_deploy(app_name: str) -> dict:
     Image: ``{OPENSHIFT_INTERNAL_REGISTRY}/{namespace}/{app_name}:{tag}`` (repository
     passed as ``--set image.repository=...`` / ``image.tag``).
 
-    ``app_name`` should match ``openshift_build`` ``name`` and the clone directory
-    (``git_clone`` ``local_path`` or URL-derived name).
+    ``app_name`` should match ``debug_openshift_build`` ``name`` and the clone directory
+    (``debug_git_clone`` ``local_path`` or URL-derived name).
 
     Chart directory (first path with ``Chart.yaml``): ``{app_name}/chart``, then
     ``{app_name}`` (chart at clone root), then ``chart`` under workspace root.

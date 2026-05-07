@@ -1,4 +1,4 @@
-"""OpenShift tool implementations: openshift_build + wait_for_build."""
+"""OpenShift tool implementations: openshift_build + wait_for_build (MCP: debug_* + deploy_from_git)."""
 
 import asyncio
 import logging
@@ -56,13 +56,13 @@ async def openshift_build(name: str, git_workspace: str | None = None) -> dict:
     2. ``oc start-build <name> --from-dir=<git_workspace> -n <ns>``
 
     ``git_workspace`` is resolved under ``WORKSPACE_ROOT``. If omitted, defaults to
-    ``name`` (same folder as ``git_clone`` when using URL-derived ``application_name``).
+    ``name`` (same folder as ``debug_git_clone`` / ``deploy_from_git`` when using URL-derived ``application_name``).
 
     If step 1 fails because the BuildConfig already exists, that is treated as success
     and step 2 still runs.
 
     Returns:
-        dict with ``build_name`` (same as ``build``, for ``wait_for_build``), ``namespace``,
+        dict with ``build_name`` (same as ``build``, for ``debug_wait_for_build``), ``namespace``,
         ``console_url`` (if ``OPENSHIFT_CONSOLE_BASE_URL`` is set), ``reused_buildconfig``,
         ``new_build``, ``start_build_output``.
 
@@ -179,7 +179,7 @@ async def wait_for_build(
 
     Args:
         build_name:            Full build name (e.g. ``my-app-3``), typically
-                               from ``openshift_build`` output ``build_name``.
+                               from ``debug_openshift_build`` output ``build_name``.
         timeout_seconds:       Maximum seconds to wait before giving up
                                (default 3600; max enforced at 7200).
         poll_interval_seconds: Seconds between polls (clamped 5–60; default 10).

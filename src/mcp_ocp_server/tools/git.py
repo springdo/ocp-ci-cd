@@ -1,4 +1,4 @@
-"""git_clone tool implementation."""
+"""git_clone implementation (MCP tool: debug_git_clone, also used by deploy_from_git)."""
 
 import logging
 import os
@@ -134,6 +134,6 @@ async def git_clone(
     logger.info("git_clone OK  dest=%s  elapsed=%.1fs", dest, elapsed)
     return (
         f"Cloned {repo_url} → {dest}\n"
-        f"application_name={effective_path}  (use for openshift_build name, helm_deploy app_name)\n"
+        f"application_name={effective_path}  (use for deploy_from_git / debug_openshift_build name, debug_helm_deploy app_name)\n"
         f"{result.stdout}"
     ).strip()

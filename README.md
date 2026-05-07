@@ -1,6 +1,6 @@
 # MCP OCP Server
 
-An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and run `git clone` → `openshift_build` → `wait_for_build` → `helm_deploy` as natural-language-driven tool calls.
+An MCP server that exposes OpenShift build and Helm deployment operations over the [Streamable HTTP](https://modelcontextprotocol.io/specification/latest/basic/transports) transport. Connect any MCP client (e.g. Cursor) to the server's HTTP endpoint and call **`deploy_from_git`** for clone → build → wait → Helm in one step, or use the **`debug_*`** tools for each step separately.
 
 ## Prerequisites
 
@@ -16,10 +16,11 @@ An MCP server that exposes OpenShift build and Helm deployment operations over t
 
 | Tool | What it does |
 |------|-------------|
-| `git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<application_name>`; `local_path` is optional (defaults to the repo name from the URL). Optional GitHub PAT for private **HTTPS** repos |
-| `openshift_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…`. `git_workspace` defaults to `name` (same folder as clone when names match). Returns `build` / `build_name`, `namespace`, optional `console_url` (set `OPENSHIFT_CONSOLE_BASE_URL`). Reuses existing BuildConfig if present. |
-| `wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
-| `helm_deploy` | `helm upgrade -i <app_name> <chart>` (no `--wait`) with `fullnameOverride` and internal-registry `image.repository`; chart at `<app_name>/chart` or `chart/`; returns `route_url` when `oc get route` finds the app |
+| `deploy_from_git` | One call: `debug_git_clone` → `debug_openshift_build` → `debug_wait_for_build` → `debug_helm_deploy`. Returns `application_name`, `clone`, `build`, `wait`, and `helm`. Fails before Helm if the build does not reach **Complete**. |
+| `debug_git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<application_name>`; `local_path` is optional (defaults to the repo name from the URL). Optional GitHub PAT for private **HTTPS** repos |
+| `debug_openshift_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…`. `git_workspace` defaults to `name` (same folder as clone when names match). Returns `build` / `build_name`, `namespace`, optional `console_url` (set `OPENSHIFT_CONSOLE_BASE_URL`). Reuses existing BuildConfig if present. |
+| `debug_wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
+| `debug_helm_deploy` | `helm upgrade -i <app_name> <chart>` (no `--wait`) with `fullnameOverride` and internal-registry `image.repository`; chart at `<app_name>/chart` or `chart/`; returns `route_url` when `oc get route` finds the app |
 
 ## Running locally (development)
 
@@ -59,10 +60,10 @@ http://127.0.0.1:8000/mcp
 | `POD_NAMESPACE` | *(unset locally)* | In-cluster, injected by the Downward API — **the MCP pod's namespace**. With no `OCP_TARGET_NAMESPACE`, tools use this in-cluster; locally they use your **current `oc` context** namespace (then `default`). |
 | `KUBECONFIG` | *(auto in-cluster)* | Path to kubeconfig; auto-generated from SA token when running in a pod |
 | `MCP_API_KEY` | *(unset = no auth)* | When set, all requests must carry `X-API-Key: <value>` |
-| `GITHUB_TOKEN` | *(unset)* | GitHub personal access token for private **HTTPS** clones when the `git_clone` tool does not pass `github_token` |
-| `OPENSHIFT_CONSOLE_BASE_URL` | *(unset)* | Web console origin with no trailing slash (e.g. `https://console-openshift-console.apps.<cluster>`). Enables `console_url` on `openshift_build`. Discover with `oc get route console -n openshift-console -o jsonpath='{.spec.host}'` and prefix `https://`. |
-| `OPENSHIFT_INTERNAL_REGISTRY` | `image-registry.openshift-image-registry.svc:5000` | Registry host for `helm_deploy` `image.repository` (`<registry>/<namespace>/<app_name>`). |
-| `HELM_DEPLOY_IMAGE_TAG` | `latest` | Image tag passed to `helm_deploy` (`--set image.tag`). |
+| `GITHUB_TOKEN` | *(unset)* | GitHub personal access token for private **HTTPS** clones when `debug_git_clone` / `deploy_from_git` does not pass `github_token` |
+| `OPENSHIFT_CONSOLE_BASE_URL` | *(unset)* | Web console origin with no trailing slash (e.g. `https://console-openshift-console.apps.<cluster>`). Enables `console_url` on `debug_openshift_build`. Discover with `oc get route console -n openshift-console -o jsonpath='{.spec.host}'` and prefix `https://`. |
+| `OPENSHIFT_INTERNAL_REGISTRY` | `image-registry.openshift-image-registry.svc:5000` | Registry host for `debug_helm_deploy` / `deploy_from_git` `image.repository` (`<registry>/<namespace>/<app_name>`). |
+| `HELM_DEPLOY_IMAGE_TAG` | `latest` | Image tag passed to `debug_helm_deploy` / `deploy_from_git` (`--set image.tag`). |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 
 ### Private GitHub repositories
@@ -70,22 +71,22 @@ http://127.0.0.1:8000/mcp
 Use an **HTTPS** URL (for example `https://github.com/org/private-repo.git`). Either:
 
 - set `GITHUB_TOKEN` in the environment (recommended for OpenShift — inject from a Secret), or
-- pass `github_token` on the `git_clone` tool call (avoid logging it in untrusted clients).
+- pass `github_token` on `debug_git_clone` or `deploy_from_git` (avoid logging it in untrusted clients).
 
 SSH URLs are not altered; use SSH keys or an agent if you clone via `git@github.com:...`.
 
 The container image sets default `git config` `user.name` / `user.email` to **OCP_BOT** / **OCP_BOT@orange-bank.ie** so git does not fail identity checks after clone.
 
-### OpenShift target namespace and `openshift_build`
+### OpenShift target namespace and builds
 
 - **`oc` / `helm` tools** resolve the namespace as: `OCP_TARGET_NAMESPACE` → **`POD_NAMESPACE`** (the MCP pod's namespace when running in-cluster) → **active `oc` context** namespace when developing locally → `default` if that cannot be read.
-- Before `openshift_build`, `wait_for_build`, and `helm_deploy`, the server may **ensure the target namespace exists**. If the target is **the same as the MCP pod’s namespace** (`POD_NAMESPACE`), this step is skipped — no cluster-scoped `Namespace` GET is required. For **other** targets (`OCP_TARGET_NAMESPACE`), your identity needs permission to read or create namespaces/projects.
-- If **`oc new-build` fails because the BuildConfig already exists**, **`openshift_build`** still succeeds and runs **`oc start-build`** (after verifying the BuildConfig with `oc get buildconfig`).
+- Before `debug_openshift_build`, `debug_wait_for_build`, `debug_helm_deploy`, and `deploy_from_git`, the server may **ensure the target namespace exists**. If the target is **the same as the MCP pod’s namespace** (`POD_NAMESPACE`), this step is skipped — no cluster-scoped `Namespace` GET is required. For **other** targets (`OCP_TARGET_NAMESPACE`), your identity needs permission to read or create namespaces/projects.
+- If **`oc new-build` fails because the BuildConfig already exists**, **`debug_openshift_build`** still succeeds and runs **`oc start-build`** (after verifying the BuildConfig with `oc get buildconfig`).
 - Binary uploads (`oc start-build --from-dir`) need **`create`** on **`buildconfigs/instantiatebinary`** — the Helm chart `Role` includes this; re-apply the chart if you hit Forbidden on upload.
 
-### `helm_deploy` (template app)
+### `debug_helm_deploy` / `deploy_from_git` (template app)
 
-- **Single argument `app_name`:** use the same string as `openshift_build` `name` and as the clone directory (`git_clone` `local_path`, or the URL-derived name when `local_path` is omitted) so the image `image-registry.openshift-image-registry.svc:5000/<namespace>/<app_name>` matches the build output.
+- **Single argument `app_name` (or auto from `deploy_from_git`):** use the same string as `debug_openshift_build` `name` and as the clone directory (`debug_git_clone` `local_path`, or the URL-derived name when `local_path` is omitted) so the image `image-registry.openshift-image-registry.svc:5000/<namespace>/<app_name>` matches the build output.
 - **Chart:** first path under `WORKSPACE_ROOT` that contains `Chart.yaml`: `<app_name>/chart`, then `<app_name>` (chart at clone root — common for template repos), then `chart`.
 - **Helm:** `helm upgrade -i <app_name> … --set-string fullnameOverride=<app_name> --set image.repository=… --set image.tag=…` (no `--wait`; idempotent).
 - **Route URL:** after success, `oc get route` looks for `app.kubernetes.io/instance=<app_name>` or a Route named `app_name`. Template charts should follow one of those conventions.
@@ -224,8 +225,9 @@ For local development (no TLS, no auth):
 ## Typical end-to-end flow
 
 ```
-git_clone              Clone into WORKSPACE_ROOT/<application_name> (optional local_path; else URL-derived)
-openshift_build        name (+ optional git_workspace, default name); returns build name, namespace, optional console URL
-wait_for_build         Block until build_name reaches Complete (or fail fast)
-helm_deploy            helm upgrade -i (no --wait), fullnameOverride + image; route_url when found
+deploy_from_git        Clone → binary build → wait for Complete → helm (single tool)
+debug_git_clone        Clone into WORKSPACE_ROOT/<application_name> (optional local_path; else URL-derived)
+debug_openshift_build  name (+ optional git_workspace, default name); returns build name, namespace, optional console URL
+debug_wait_for_build   Block until build_name reaches Complete (or fail fast)
+debug_helm_deploy      helm upgrade -i (no --wait), fullnameOverride + image; route_url when found
 ```
