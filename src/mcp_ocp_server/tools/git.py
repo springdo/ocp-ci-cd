@@ -2,6 +2,7 @@
 
 import logging
 import os
+import pathlib
 import time
 from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
@@ -47,6 +48,35 @@ def _clone_url_with_https_pat(repo_url: str, token: str) -> str:
     return urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
 
 
+def _clone_destination_exists_message(stderr: str) -> bool:
+    """True if git clone failed because the target path already exists and is non-empty."""
+    s = (stderr or "").lower()
+    return "already exists" in s and "not an empty directory" in s
+
+
+async def _git_is_worktree(dest: pathlib.Path) -> bool:
+    r = await run(
+        ["git", "-C", str(dest), "rev-parse", "--is-inside-work-tree"],
+        cwd=WORKSPACE_ROOT,
+    )
+    return r.exit_code == 0 and r.stdout.strip() == "true"
+
+
+async def _scrub_origin_if_pat(dest: pathlib.Path, repo_url: str, auth_kind: str) -> None:
+    if auth_kind != "https_pat":
+        return
+    origin_set = await run(
+        ["git", "-C", str(dest), "remote", "set-url", "origin", repo_url],
+        cwd=WORKSPACE_ROOT,
+    )
+    if origin_set.exit_code != 0:
+        logger.warning(
+            "git_clone: could not scrub origin URL (exit %d): %s",
+            origin_set.exit_code,
+            origin_set.stderr.strip(),
+        )
+
+
 async def git_clone(
     repo_url: str,
     local_path: str | None = None,
@@ -67,8 +97,12 @@ async def git_clone(
     Returns:
         A short summary string on success (includes ``application_name``).
 
+    If ``git clone`` fails because the destination already exists and is non-empty,
+    and that path is already a Git work tree, runs ``git pull`` there instead of
+    raising.
+
     Raises:
-        RuntimeError: If `git clone` exits non-zero.
+        RuntimeError: If `git clone` / `git pull` exits non-zero.
         ValueError:   If local_path would escape WORKSPACE_ROOT.
     """
     effective_path = (local_path or "").strip() or application_name_from_repo_url(repo_url)
@@ -108,6 +142,36 @@ async def git_clone(
     elapsed = round(time.monotonic() - start, 1)
 
     if result.exit_code != 0:
+        if result.exit_code == 128 and _clone_destination_exists_message(result.stderr):
+            if await _git_is_worktree(dest):
+                logger.info(
+                    "git_clone: destination exists and is a git repo, running git pull  dest=%s",
+                    dest,
+                )
+                pull = await run(["git", "-C", str(dest), "pull"], cwd=WORKSPACE_ROOT)
+                elapsed = round(time.monotonic() - start, 1)
+                if pull.exit_code != 0:
+                    logger.error(
+                        "git_clone FAILED (git pull)  dest=%s  exit=%d\n%s",
+                        dest,
+                        pull.exit_code,
+                        pull.stderr,
+                    )
+                    raise RuntimeError(
+                        f"git pull failed (exit {pull.exit_code}):\n{pull.stderr}"
+                    )
+                await _scrub_origin_if_pat(dest, repo_url, auth_kind)
+                logger.info("git_clone OK (pulled)  dest=%s  elapsed=%.1fs", dest, elapsed)
+                return (
+                    f"Pulled updates in existing repo {repo_url} at {dest}\n"
+                    f"application_name={effective_path}  (use for deploy_from_git / debug_openshift_build name, debug_helm_deploy app_name)\n"
+                    f"{pull.stdout}"
+                ).strip()
+            logger.warning(
+                "git_clone: clone failed (destination exists) but %s is not a git work tree; not running pull",
+                dest,
+            )
+
         logger.error(
             "git_clone FAILED  repo=%s  dest=%s  exit=%d\n%s",
             repo_url,
@@ -119,17 +183,7 @@ async def git_clone(
             f"git clone failed (exit {result.exit_code}):\n{result.stderr}"
         )
 
-    if auth_kind == "https_pat":
-        origin_set = await run(
-            ["git", "-C", str(dest), "remote", "set-url", "origin", repo_url],
-            cwd=WORKSPACE_ROOT,
-        )
-        if origin_set.exit_code != 0:
-            logger.warning(
-                "git_clone: could not scrub origin URL (exit %d): %s",
-                origin_set.exit_code,
-                origin_set.stderr.strip(),
-            )
+    await _scrub_origin_if_pat(dest, repo_url, auth_kind)
 
     logger.info("git_clone OK  dest=%s  elapsed=%.1fs", dest, elapsed)
     return (

@@ -85,6 +85,9 @@ async def debug_git_clone(
         github_token:  Optional GitHub PAT for private HTTPS repos. When omitted,
                        ``GITHUB_TOKEN`` from the environment is used if set.
                        SSH URLs are unchanged (use deploy keys or an SSH agent).
+
+    If the clone target already exists as a Git work tree, ``git pull`` is run there
+    instead of failing with "destination path … already exists".
     """
     has_token = bool(
         (github_token and github_token.strip())
