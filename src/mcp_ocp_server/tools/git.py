@@ -54,6 +54,26 @@ def _clone_destination_exists_message(stderr: str) -> bool:
     return "already exists" in s and "not an empty directory" in s
 
 
+async def _git_head_info(dest: pathlib.Path) -> tuple[str, str]:
+    """Return (commit_hash, commit_message) for HEAD at *dest*."""
+    hash_r = await run(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"], cwd=WORKSPACE_ROOT
+    )
+    if hash_r.exit_code != 0:
+        raise RuntimeError(
+            f"git rev-parse HEAD failed (exit {hash_r.exit_code}):\n{hash_r.stderr}"
+        )
+    log_r = await run(
+        ["git", "-C", str(dest), "log", "-1", "--pretty=format:%s%n%b"],
+        cwd=WORKSPACE_ROOT,
+    )
+    if log_r.exit_code != 0:
+        raise RuntimeError(
+            f"git log failed (exit {log_r.exit_code}):\n{log_r.stderr}"
+        )
+    return hash_r.stdout.strip(), log_r.stdout.strip()
+
+
 async def _git_is_worktree(dest: pathlib.Path) -> bool:
     r = await run(
         ["git", "-C", str(dest), "rev-parse", "--is-inside-work-tree"],
@@ -77,12 +97,84 @@ async def _scrub_origin_if_pat(dest: pathlib.Path, repo_url: str, auth_kind: str
         )
 
 
+def resolve_repo_dest(repo_path: str) -> pathlib.Path:
+    """Resolve *repo_path* to an absolute path confined under WORKSPACE_ROOT.
+
+    Accepts relative paths (resolved under WORKSPACE_ROOT) or absolute paths
+    that already reside under WORKSPACE_ROOT.  Raises ValueError for traversal
+    attempts or absolute paths outside WORKSPACE_ROOT.
+    """
+    p = pathlib.Path(repo_path)
+    if p.is_absolute():
+        root = WORKSPACE_ROOT.resolve()
+        resolved = p.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError(
+                f"Path {repo_path!r} is outside WORKSPACE_ROOT ({root})"
+            )
+        return resolved
+    return confined_path(repo_path)
+
+
+async def git_pull(repo_path: str) -> dict:
+    """Pull the latest changes in an existing git work tree.
+
+    Args:
+        repo_path: Directory of the repository.  May be a relative path under
+                   WORKSPACE_ROOT (e.g. ``my-app``) or an absolute path that
+                   resolves inside WORKSPACE_ROOT.
+
+    Returns:
+        A dict with:
+        - ``commit_hash``:   Full SHA-1 of HEAD after the pull.
+        - ``commit_message``: Subject + body of the latest commit (trimmed).
+        - ``pull_output``:  Raw stdout from ``git pull`` (e.g. "Already up to date.").
+
+    Raises:
+        ValueError:   If the path escapes WORKSPACE_ROOT.
+        RuntimeError: If the path is not a Git work tree, or if ``git pull`` /
+                      subsequent git commands exit non-zero.
+    """
+    dest = resolve_repo_dest(repo_path)
+    logger.info("git_pull called  dest=%s", dest)
+
+    if not await _git_is_worktree(dest):
+        raise RuntimeError(
+            f"git_pull: {dest} is not a Git work tree; use debug_git_clone to clone first"
+        )
+
+    start = time.monotonic()
+    pull = await run(["git", "-C", str(dest), "pull"], cwd=WORKSPACE_ROOT)
+    if pull.exit_code != 0:
+        logger.error(
+            "git_pull FAILED  dest=%s  exit=%d\n%s",
+            dest,
+            pull.exit_code,
+            pull.stderr,
+        )
+        raise RuntimeError(f"git pull failed (exit {pull.exit_code}):\n{pull.stderr}")
+
+    commit_hash, commit_message = await _git_head_info(dest)
+
+    elapsed = round(time.monotonic() - start, 1)
+    logger.info(
+        "git_pull OK  dest=%s  hash=%s  elapsed=%.1fs", dest, commit_hash[:12], elapsed
+    )
+    return {
+        "commit_hash": commit_hash,
+        "commit_message": commit_message,
+        "pull_output": pull.stdout.strip(),
+    }
+
+
 async def git_clone(
     repo_url: str,
     local_path: str | None = None,
     branch: str | None = None,
     github_token: str | None = None,
-) -> str:
+) -> dict:
     """Clone a git repository into WORKSPACE_ROOT/<local_path>.
 
     Args:
@@ -95,7 +187,9 @@ async def git_clone(
                         ``GITHUB_TOKEN`` from the environment is used when set.
 
     Returns:
-        A short summary string on success (includes ``application_name``).
+        A dict with ``application_name``, ``commit_hash``, ``commit_message``, and
+        ``clone_output`` (raw git stdout).  When the destination already exists as a
+        Git work tree, ``git pull`` is run and ``clone_output`` reflects that.
 
     If ``git clone`` fails because the destination already exists and is non-empty,
     and that path is already a Git work tree, runs ``git pull`` there instead of
@@ -161,12 +255,17 @@ async def git_clone(
                         f"git pull failed (exit {pull.exit_code}):\n{pull.stderr}"
                     )
                 await _scrub_origin_if_pat(dest, repo_url, auth_kind)
-                logger.info("git_clone OK (pulled)  dest=%s  elapsed=%.1fs", dest, elapsed)
-                return (
-                    f"Pulled updates in existing repo {repo_url} at {dest}\n"
-                    f"application_name={effective_path}  (use for deploy_from_git / debug_openshift_build name, debug_helm_deploy app_name)\n"
-                    f"{pull.stdout}"
-                ).strip()
+                commit_hash, commit_message = await _git_head_info(dest)
+                logger.info(
+                    "git_clone OK (pulled)  dest=%s  hash=%s  elapsed=%.1fs",
+                    dest, commit_hash[:12], elapsed,
+                )
+                return {
+                    "application_name": effective_path,
+                    "commit_hash": commit_hash,
+                    "commit_message": commit_message,
+                    "clone_output": pull.stdout.strip(),
+                }
             logger.warning(
                 "git_clone: clone failed (destination exists) but %s is not a git work tree; not running pull",
                 dest,
@@ -184,10 +283,12 @@ async def git_clone(
         )
 
     await _scrub_origin_if_pat(dest, repo_url, auth_kind)
+    commit_hash, commit_message = await _git_head_info(dest)
 
-    logger.info("git_clone OK  dest=%s  elapsed=%.1fs", dest, elapsed)
-    return (
-        f"Cloned {repo_url} → {dest}\n"
-        f"application_name={effective_path}  (use for deploy_from_git / debug_openshift_build name, debug_helm_deploy app_name)\n"
-        f"{result.stdout}"
-    ).strip()
+    logger.info("git_clone OK  dest=%s  hash=%s  elapsed=%.1fs", dest, commit_hash[:12], elapsed)
+    return {
+        "application_name": effective_path,
+        "commit_hash": commit_hash,
+        "commit_message": commit_message,
+        "clone_output": result.stdout.strip(),
+    }

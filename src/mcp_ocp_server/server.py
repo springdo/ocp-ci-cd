@@ -33,6 +33,7 @@ from .runner import WORKSPACE_ROOT
 from .target_ns import target_namespace
 from .tools.git import application_name_from_repo_url
 from .tools.git import git_clone as _git_clone
+from .tools.git import git_pull as _git_pull
 from .tools.helm import helm_deploy as _helm_deploy
 from .tools.openshift import openshift_build as _openshift_build
 from .tools.openshift import wait_for_build as _wait_for_build
@@ -54,8 +55,8 @@ mcp = FastMCP(
     instructions=(
         "MCP server for OpenShift builds and Helm deployments. "
         "Prefer deploy_from_git(repo_url, …) for clone → build → wait → helm in one call. "
-        "Low-level steps are available as debug_git_clone, debug_openshift_build, "
-        "debug_wait_for_build, debug_helm_deploy."
+        "Low-level steps are available as debug_git_clone, debug_git_pull, "
+        "debug_openshift_build, debug_wait_for_build, debug_helm_deploy."
     ),
     stateless_http=True,
 )
@@ -71,7 +72,7 @@ async def debug_git_clone(
     local_path: str | None = None,
     branch: str | None = None,
     github_token: str | None = None,
-) -> str:
+) -> dict:
     """Clone a git repository into WORKSPACE_ROOT/<application_name> (low-level).
 
     Default ``WORKSPACE_ROOT`` is ``/workspace`` (set in the container; override locally if needed).
@@ -88,6 +89,12 @@ async def debug_git_clone(
 
     If the clone target already exists as a Git work tree, ``git pull`` is run there
     instead of failing with "destination path … already exists".
+
+    Returns a dict with:
+    - ``application_name``: Derived clone directory name (pass to ``debug_openshift_build`` / ``debug_helm_deploy``).
+    - ``commit_hash``:      Full SHA-1 of HEAD after clone / pull.
+    - ``commit_message``:   Subject + body of the latest commit (trimmed).
+    - ``clone_output``:     Raw git stdout (clone summary or pull output).
     """
     has_token = bool(
         (github_token and github_token.strip())
@@ -107,6 +114,44 @@ async def debug_git_clone(
         return result
     except Exception as exc:
         logger.error("TOOL debug_git_clone ERROR  elapsed=%.1fs  error=%s", time.monotonic() - start, exc)
+        raise
+
+
+@mcp.tool()
+async def debug_git_pull(repo_path: str) -> dict:
+    """Pull the latest changes in an existing git work tree (low-level).
+
+    The repository must already exist under ``WORKSPACE_ROOT`` (default ``/workspace``).
+    Accepts the same relative path used as ``local_path`` in ``debug_git_clone``
+    (e.g. ``my-app`` → ``WORKSPACE_ROOT/my-app``), or an absolute path that resolves
+    inside ``WORKSPACE_ROOT``.
+
+    Args:
+        repo_path: Relative subdirectory under ``WORKSPACE_ROOT``, or absolute path
+                   inside ``WORKSPACE_ROOT``.
+
+    Returns a dict with:
+    - ``commit_hash``:    Full SHA-1 of HEAD after the pull.
+    - ``commit_message``: Subject + body of the latest commit (trimmed).
+    - ``pull_output``:   Raw ``git pull`` stdout (e.g. "Already up to date.").
+    """
+    logger.info("TOOL debug_git_pull  repo_path=%r", repo_path)
+    start = time.monotonic()
+    try:
+        result = await _git_pull(repo_path)
+        logger.info(
+            "TOOL debug_git_pull OK  hash=%s  elapsed=%.1fs",
+            result.get("commit_hash", "")[:12],
+            time.monotonic() - start,
+        )
+        return result
+    except Exception as exc:
+        logger.error(
+            "TOOL debug_git_pull ERROR  repo_path=%r  elapsed=%.1fs  error=%s",
+            repo_path,
+            time.monotonic() - start,
+            exc,
+        )
         raise
 
 
@@ -270,8 +315,9 @@ async def deploy_from_git(
         build_poll_interval_seconds:  Poll interval for ``debug_wait_for_build`` (default 10).
 
     Returns:
-        Dict with ``application_name``, ``clone`` (stdout summary string), ``build``,
-        ``wait``, and ``helm`` (each tool's return shape).
+        Dict with ``application_name``, ``clone`` (dict with ``application_name``,
+        ``commit_hash``, ``commit_message``, ``clone_output``), ``build``, ``wait``,
+        and ``helm`` (each tool's return shape).
     """
     application_name = (local_path or "").strip() or application_name_from_repo_url(repo_url)
     logger.info(

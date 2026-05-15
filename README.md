@@ -17,7 +17,8 @@ An MCP server that exposes OpenShift build and Helm deployment operations over t
 | Tool | What it does |
 |------|-------------|
 | `deploy_from_git` | One call: `debug_git_clone` → `debug_openshift_build` → `debug_wait_for_build` → `debug_helm_deploy`. Returns `application_name`, `clone`, `build`, `wait`, and `helm`. Fails before Helm if the build does not reach **Complete**. |
-| `debug_git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<application_name>`; `local_path` is optional (defaults to the repo name from the URL). Optional GitHub PAT for private **HTTPS** repos |
+| `debug_git_clone` | `git clone --depth 1 <url>` into `WORKSPACE_ROOT/<application_name>`; `local_path` is optional (defaults to the repo name from the URL). Optional GitHub PAT for private **HTTPS** repos. Returns `application_name`, `commit_hash`, `commit_message`, and `clone_output`. |
+| `debug_git_pull` | `git pull` inside an existing work tree under `WORKSPACE_ROOT`. Pass the same relative path used as `local_path` in `debug_git_clone`. Returns `commit_hash`, `commit_message`, and `pull_output`. |
 | `debug_openshift_build` | Runs `oc new-build --binary --name=… --strategy=docker` then `oc start-build … --from-dir=…`. `git_workspace` defaults to `name` (same folder as clone when names match). Returns `build` / `build_name`, `namespace`, optional `console_url` (set `OPENSHIFT_CONSOLE_BASE_URL`). Reuses existing BuildConfig if present. |
 | `debug_wait_for_build` | Poll `oc get build/<name>` until Complete / Failed / Cancelled / Error or timeout |
 | `debug_helm_deploy` | `helm upgrade -i <app_name> <chart>` (no `--wait`) with `fullnameOverride` and internal-registry `image.repository`; chart at `<app_name>/chart` or `chart/`; returns `route_url` when `oc get route` finds the app |
